@@ -32,11 +32,47 @@ from hosted_worker.crawler import (
     _select_candidates,
 )
 from hosted_worker.runner import dispatch
+from hosted_worker.selfcheck import _model_state_digest
 from hosted_worker.training import _bounded_participant_window, _model_blob_path
 from image_ranker.ml import PreferenceHead
 
 
 class HostedWorkerTests(unittest.TestCase):
+    def test_encoder_fingerprint_flattens_scalar_state(self):
+        class ScalarTensor:
+            dtype = "float32"
+            shape = ()
+            flattened = False
+
+            def detach(self):
+                return self
+
+            def cpu(self):
+                return self
+
+            def contiguous(self):
+                return self
+
+            def reshape(self, size):
+                self.flattened = size == -1
+                return self
+
+            def view(self, dtype):
+                if not self.flattened or dtype != "uint8":
+                    raise AssertionError("scalar state was not flattened before viewing")
+                return self
+
+            def numpy(self):
+                return np.asarray([0, 0, 128, 63], dtype=np.uint8)
+
+        tensor = ScalarTensor()
+        runtime = SimpleNamespace(
+            model=SimpleNamespace(state_dict=lambda: {"scalar": tensor}),
+            torch=SimpleNamespace(uint8="uint8"),
+        )
+        self.assertRegex(_model_state_digest(runtime), r"^[0-9a-f]{64}$")
+        self.assertTrue(tensor.flattened)
+
     def test_hosted_ml_import_does_not_require_sqlite_extension(self):
         script = """
 import builtins

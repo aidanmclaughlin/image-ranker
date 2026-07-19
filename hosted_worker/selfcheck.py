@@ -17,7 +17,15 @@ def _model_state_digest(runtime: _OpenClipRuntime) -> str:
         digest.update(name.encode("utf-8"))
         digest.update(str(value.dtype).encode("ascii"))
         digest.update(json.dumps(list(value.shape)).encode("ascii"))
-        digest.update(value.view(runtime.torch.uint8).numpy().tobytes(order="C"))
+        # PyTorch cannot reinterpret a zero-dimensional scalar as a smaller
+        # dtype directly. Flatten first so scalar and non-scalar state entries
+        # share one exact raw-byte path.
+        digest.update(
+            value.reshape(-1)
+            .view(runtime.torch.uint8)
+            .numpy()
+            .tobytes(order="C")
+        )
     return digest.hexdigest()
 
 
