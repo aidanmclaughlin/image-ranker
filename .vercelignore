@@ -1,5 +1,4 @@
-# Vercel serves only web/, but these exclusions also keep private local artifacts
-# out of deployment source uploads.
+# Keep private local artifacts and legacy-only files out of deployment uploads.
 /data
 data/
 models/

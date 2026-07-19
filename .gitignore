@@ -1,5 +1,8 @@
 .venv/
 .vercel/
+.next/
+node_modules/
+*.tsbuildinfo
 *.egg-info/
 __pycache__/
 .pytest_cache/
@@ -11,4 +14,6 @@ __pycache__/
 data/
 models/
 *.sqlite3
+*.sqlite3-*
 .env*.local
+.env*

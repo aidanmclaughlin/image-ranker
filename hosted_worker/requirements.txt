@@ -1,0 +1,6 @@
+numpy==2.5.1
+open-clip-torch==3.3.0
+Pillow==12.3.0
+psycopg[binary]==3.3.4
+torch==2.13.0
+vercel==0.7.1

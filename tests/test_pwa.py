@@ -39,14 +39,9 @@ class PwaTests(unittest.TestCase):
         self.assertIn("PRIVATE_PATH.test(url.pathname)", worker)
         self.assertIn('caches.match("/index.html")', worker)
 
-    def test_vercel_deployment_is_static_web_only(self):
+    def test_vercel_deployment_is_full_stack_nextjs(self):
         config = json.loads((ROOT / "vercel.json").read_text())
-        self.assertIsNone(config["framework"])
-        self.assertEqual(config["buildCommand"], "")
-        self.assertEqual(config["installCommand"], "")
-        self.assertEqual(config["outputDirectory"], "web")
-        self.assertNotIn("functions", config)
-        self.assertNotIn("builds", config)
+        self.assertEqual(config["framework"], "nextjs")
 
         ignored = (ROOT / ".vercelignore").read_text()
         for private_path in ("data/", "models/", "*.sqlite3", ".env"):

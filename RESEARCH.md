@@ -12,9 +12,9 @@ The recommended first model is deliberately small:
 4. Use that function only to predict personal taste and to choose informative candidates.
 5. Keep live Elo for instant UI feedback, but periodically refit an item-only Bradley–Terry model over the complete comparison graph for the canonical ranking.
 
-The repository currently ships **OpenCLIP ViT-B/32** as the practical baseline because it is open, fast enough for a local Mac, and already integrated. The research recommendation is not that OpenCLIP is known to be the best aesthetics encoder—there is no paper establishing that for this exact one-person regime—but that it is the correct baseline to beat. DINOv2 and SigLIP/SigLIP 2 should be evaluated on the same image-disjoint comparisons before any encoder is promoted or combined.
+The repository currently ships **OpenCLIP ViT-B/32** as the practical baseline because it is open, reproducible, feasible in a bounded CPU Sandbox (and on a local Mac), and already integrated. The research recommendation is not that OpenCLIP is known to be the best aesthetics encoder—there is no paper establishing that for this exact one-person regime—but that it is the correct baseline to beat. DINOv2 and SigLIP/SigLIP 2 should be evaluated on the same image-disjoint comparisons before any encoder is promoted or combined.
 
-Population aesthetics models, award status, resolution, and source curation are useful **quality priors and acquisition filters**, never substitutes for the user's choices. The personal preference model must be trained only from the user's labels. Images, comparison history, embeddings, and model artifacts remain local and outside Git.
+Population aesthetics models, award status, resolution, and source curation are useful **quality priors and acquisition filters**, never substitutes for the user's choices. The personal preference model must be trained only from the user's labels. Images, comparison history, embeddings, and model artifacts stay in private deployer-controlled runtime resources and outside Git.
 
 ## 1. Problem formulation
 
@@ -51,7 +51,7 @@ There are two related but different estimands:
 - **Collection rank:** how the already-labeled images compare, estimated from item identities and their comparison graph.
 - **Predictive taste:** how likely the user is to prefer a new image, estimated from visual features.
 
-They should not be conflated. A feature model can smooth away an idiosyncratic favorite, while an item-only model cannot score unseen candidates. The canonical collection rank should therefore be a regularized batch Bradley–Terry fit over item parameters; the crawler and pair selector should use the feature model.
+They should not be conflated. A feature model can smooth away an idiosyncratic favorite, while an item-only model cannot score unseen candidates. The long-run canonical collection rank should therefore be a regularized batch Bradley–Terry fit over item parameters; the crawler and pair selector should use the feature model. The shipped v1 deliberately displays live Elo, as requested, and retains every comparison so that batch refitting can be introduced once the graph has enough coverage to make it meaningful.
 
 ### Elo's proper role
 
@@ -161,7 +161,7 @@ Label count alone is not a gate: thousands of repetitive comparisons from one vi
 - no material regression in source/photographer holdouts, calibration, or hidden-repeat behavior;
 - gains persist across at least three data splits or temporal folds and random seeds;
 - hyperparameters were chosen without touching the final test set;
-- local embedding/training latency and artifact size stay within the product budget.
+- hosted CPU embedding/training latency, transfer, and artifact size stay within the product budget.
 
 Every artifact should store the comparison cutoff, split IDs, encoder and weight hash, preprocessing manifest, random seed, hyperparameters, source commit, and metrics. Retraining should create immutable versioned artifacts and switch the active model only after gates pass, so rollback is exact.
 
@@ -232,15 +232,15 @@ Use validation folds for encoder, regularization, acquisition, and calibration c
 - tuning encoder, preprocessing, or thresholds after inspecting the locked test set;
 - evaluating only candidates selected by the current model, which hides misses outside its feedback loop.
 
-Deduplicate before splitting, keep metadata out of the personal visual head, maintain a random audit stream, and publish all split logic in the local model manifest.
+Deduplicate before splitting, keep metadata out of the personal visual head, maintain a random audit stream, and record all split logic in the private model manifest.
 
 ## 10. Chosen v1 design and tradeoffs
 
 | Decision | v1 choice | Reason | Revisit when |
 |---|---|---|---|
 | Personal objective | Feature-aware logistic Bradley–Terry | Directly matches pairwise labels and generalizes through image features. | Stable residual cycles or category-conditioned failures appear. |
-| Encoder | Frozen OpenCLIP ViT-B/32 | Already integrated, local, reproducible, and a credible semantic baseline. | The controlled DINOv2/SigLIP bake-off has enough disjoint labels. |
-| Collection rank | Live Elo plus periodic item-only BT refit | Immediate feedback without treating order-sensitive Elo as canonical truth. | Never remove immutable refits; a Bayesian ranker may add intervals later. |
+| Encoder | Frozen OpenCLIP ViT-B/32 | Already integrated, CPU-feasible, reproducible, and a credible semantic baseline. | The controlled DINOv2/SigLIP bake-off has enough disjoint labels. |
+| Collection rank | Live Elo with immutable comparison history | Immediate feedback matches the product requirement; retained labels make a later item-only BT refit reproducible. | Add periodic BT only after graph coverage supports it; a Bayesian ranker may later add intervals. |
 | Cold start | Diverse editorial/open-access seeds and repeated sorting | Coverage matters more than premature model uncertainty. | Held-out performance and calibration justify active model control. |
 | Active queries | Entropy + ensemble disagreement + graph repair + exploration, then batch diversity | Balances learnability, connectivity, and novelty. | Logged ablations show a better allocation. |
 | Generic aesthetics | Soft intake prior only | Removes obvious low-value tail without overwriting personal taste. | Its incremental discovery yield is proven on random audits. |
@@ -259,7 +259,7 @@ Recommended sources, in priority order:
 - **Cleveland Museum of Art.** Its official [Open Access API](https://www.clevelandart.org/open-access-api) provides CC0 data and rights-compatible image assets.
 - **Art Institute of Chicago.** Its [Open Access program](https://www.artic.edu/open-access) and [API](https://api.artic.edu/docs/) expose public-domain status and IIIF assets. Require `is_public_domain` rather than assuming the whole collection is unrestricted.
 
-Unsplash is not a drop-in source for the current offline local archive. Its official [API documentation](https://unsplash.com/documentation) and [guidelines](https://help.unsplash.com/en/articles/2511245-unsplash-api-guidelines) require hotlinking, attribution in API displays, and download-event tracking. Add it only through a purpose-built adapter that follows the current terms; do not silently cache its API images as ordinary local files.
+Unsplash is not a drop-in source for the private archive. Its official [API documentation](https://unsplash.com/documentation) and [guidelines](https://help.unsplash.com/en/articles/2511245-unsplash-api-guidelines) require hotlinking, attribution in API displays, and download-event tracking. Add it only through a purpose-built adapter that follows the current terms; do not silently cache its API images as ordinary stored files.
 
 National Geographic, Instagram, photography competitions, and photographers' own sites are excellent inspiration and discovery metadata but should not be automatically downloaded without an official compatible API, an explicit per-work license, or direct permission. For such sources, support a metadata-only link-out or a clearly marked manual user import; never redistribute those files with the OSS repository or model artifacts.
 

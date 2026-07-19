@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "image-ranker"
 version = "0.1.0"
-description = "A local-first, active-learning photography taste engine"
+description = "A private, active-learning photography taste engine"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
