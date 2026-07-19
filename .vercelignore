@@ -1,0 +1,15 @@
+# Vercel serves only web/, but these exclusions also keep private local artifacts
+# out of deployment source uploads.
+/data
+data/
+models/
+*.sqlite3
+*.sqlite3-*
+.env
+.env.*
+.venv/
+__pycache__/
+.pytest_cache/
+tests/
+image_ranker/
+RESEARCH.md

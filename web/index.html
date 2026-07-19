@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#11110f">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Lumen">
+    <meta name="referrer" content="no-referrer">
+    <meta name="description" content="A private, local-first photography taste engine.">
+    <title>Lumen — your photography canon</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css?v=2">
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <a class="brand" href="#rank" aria-label="Lumen, rank photographs">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>Lumen</span>
+      </a>
+
+      <div class="header-stats" id="header-stats" aria-label="Collection and connection status">
+        <button class="connection-button" id="connection-button" type="button" aria-label="Configure private library connection">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span id="connection-label">Local</span>
+        </button>
+        <span><strong id="image-count">—</strong> images</span>
+        <span class="stat-divider" aria-hidden="true"></span>
+        <span><strong id="choice-count">—</strong> choices</span>
+      </div>
+    </header>
+
+    <nav class="site-nav" aria-label="Primary">
+      <a class="nav-link is-active" href="#rank" data-view-link="rank">Rank</a>
+      <a class="nav-link" href="#collection" data-view-link="collection">Collection</a>
+    </nav>
+
+    <main id="main">
+      <section class="view rank-view" id="rank" data-view="rank" aria-labelledby="rank-title">
+        <div class="rank-heading">
+          <div>
+            <p class="eyebrow"><span class="pulse" aria-hidden="true"></span>Taste session</p>
+            <h1 id="rank-title">Which image <em>stays?</em></h1>
+          </div>
+          <div class="session-tools">
+            <p id="session-count" aria-live="polite">0 choices this session</p>
+            <button class="icon-button" id="skip-button" type="button" aria-label="Skip this pair">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13m-4-4 4 4-4 4"/></svg>
+              <span>Skip</span>
+            </button>
+            <button class="icon-button" id="fullscreen-button" type="button" aria-label="Enter fullscreen comparison" aria-pressed="false">
+              <svg class="expand-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5m13 5h5v-5"/></svg>
+              <span>Fullscreen</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="arena-wrap" id="arena-wrap">
+          <div class="arena" id="arena" aria-label="Choose between two photographs" aria-busy="true">
+            <button class="candidate" id="left" type="button" data-side="left" aria-keyshortcuts="ArrowLeft Space">
+              <span class="image-shell">
+                <span class="loading-shimmer" aria-hidden="true"></span>
+                <img alt="" draggable="false">
+                <span class="choice-wash" aria-hidden="true"></span>
+              </span>
+              <span class="candidate-number" aria-hidden="true">01</span>
+              <span class="key-chip" aria-hidden="true"><span>←</span></span>
+              <span class="candidate-caption">
+                <strong class="candidate-title">Untitled</strong>
+                <span class="candidate-credit"></span>
+              </span>
+              <span class="focus-label">Selected — press Space to choose</span>
+            </button>
+
+            <div class="versus" aria-hidden="true"><span>or</span></div>
+
+            <button class="candidate" id="right" type="button" data-side="right" aria-keyshortcuts="ArrowRight Space">
+              <span class="image-shell">
+                <span class="loading-shimmer" aria-hidden="true"></span>
+                <img alt="" draggable="false">
+                <span class="choice-wash" aria-hidden="true"></span>
+              </span>
+              <span class="candidate-number" aria-hidden="true">02</span>
+              <span class="key-chip" aria-hidden="true"><span>→</span></span>
+              <span class="candidate-caption">
+                <strong class="candidate-title">Untitled</strong>
+                <span class="candidate-credit"></span>
+              </span>
+              <span class="focus-label">Selected — press Space to choose</span>
+            </button>
+          </div>
+
+          <div class="empty-state" id="empty-state" hidden>
+            <span class="empty-frame" aria-hidden="true"></span>
+            <p class="eyebrow">Ready when you are</p>
+            <h2>Add photographs to begin.</h2>
+            <p>Your collection needs at least two images before a comparison can be made.</p>
+            <code>image-ranker seed --limit 60</code>
+          </div>
+
+          <div class="error-state" id="error-state" hidden role="alert">
+            <p>We couldn’t load the next pair.</p>
+            <button class="text-button" id="retry-button" type="button">Try again</button>
+          </div>
+        </div>
+
+        <div class="instruction-bar" aria-label="Keyboard instructions">
+          <p><span><kbd>←</kbd><kbd>→</kbd></span> Focus an image</p>
+          <span class="instruction-rule" aria-hidden="true"></span>
+          <p><kbd class="space-key">Space</kbd> Confirm your choice</p>
+          <span class="instruction-rule" aria-hidden="true"></span>
+          <p><kbd>S</kbd> Skip</p>
+          <span class="instruction-rule optional-instruction" aria-hidden="true"></span>
+          <p class="optional-instruction"><kbd>F</kbd> Fullscreen</p>
+          <p class="click-hint">You can also click an image to choose it.</p>
+          <p class="touch-hint">Tap a photograph · swipe toward a side · swipe up to skip</p>
+        </div>
+      </section>
+
+      <section class="view collection-view" id="collection" data-view="collection" aria-labelledby="collection-title" hidden>
+        <div class="collection-heading">
+          <div>
+            <p class="eyebrow">Your living canon</p>
+            <h1 id="collection-title">The <em>collection.</em></h1>
+          </div>
+          <p>Ordered by your choices, not an algorithm’s idea of what should matter.</p>
+        </div>
+
+        <div class="collection-toolbar">
+          <p id="collection-summary" aria-live="polite">Loading your collection…</p>
+          <span>Elo ranking · highest first</span>
+        </div>
+        <div class="gallery" id="gallery" aria-busy="true"></div>
+        <div class="collection-empty" id="collection-empty" hidden>
+          <p>No images yet. Seed the collection, then start ranking.</p>
+          <a class="text-button" href="#rank">Return to ranking</a>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+    <dialog class="lightbox" id="lightbox" aria-label="Photograph viewer">
+      <button class="lightbox-close icon-button" type="button" aria-label="Close image viewer">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l14 14M19 5 5 19"/></svg>
+      </button>
+      <figure>
+        <img alt="">
+        <figcaption>
+          <span class="lightbox-rank"></span>
+          <span class="lightbox-name"><strong class="lightbox-title"></strong><small class="lightbox-credit"></small><small class="lightbox-license"></small></span>
+          <span class="lightbox-details"><span class="lightbox-elo"></span><a class="lightbox-source" target="_blank" rel="noreferrer">View source ↗</a></span>
+        </figcaption>
+      </figure>
+    </dialog>
+
+    <dialog class="connection-dialog" id="connection-dialog" aria-labelledby="connection-title">
+      <form id="connection-form">
+        <button class="connection-close icon-button" id="connection-close" type="button" aria-label="Close connection settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l14 14M19 5 5 19"/></svg>
+        </button>
+        <p class="eyebrow">Private bridge</p>
+        <h2 id="connection-title">Connect your library.</h2>
+        <p class="connection-intro">Lumen’s hosted shell contains no photographs or rankings. Point it at your private Image Ranker server to use this device.</p>
+        <label>
+          <span>Server address</span>
+          <input id="api-base" name="api-base" type="url" inputmode="url" autocomplete="url" autocapitalize="none" spellcheck="false" placeholder="https://your-private-server.example" required>
+        </label>
+        <label>
+          <span>Access token</span>
+          <input id="api-token" name="api-token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste the private token" minlength="24">
+        </label>
+        <p class="connection-note">Saved only in this browser. A setup link puts these values after <code>#</code>, so they are never sent to Vercel.</p>
+        <p class="connection-error" id="connection-error" role="alert" hidden></p>
+        <div class="connection-actions">
+          <button class="connect-submit" type="submit">Connect</button>
+          <button class="text-button" id="forget-connection" type="button" hidden>Forget this device</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/app.js?v=2" defer></script>
+  </body>
+</html>

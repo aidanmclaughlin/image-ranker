@@ -1,0 +1,13 @@
+.venv/
+.vercel/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.DS_Store
+
+# Private taste data and copyrighted image files never enter OSS history.
+/data
+data/
+models/
+*.sqlite3

@@ -1,0 +1,41 @@
+{
+  "name": "Lumen — Photography Ranker",
+  "short_name": "Lumen",
+  "description": "A private, local-first photography taste engine.",
+  "id": "/",
+  "start_url": "/#rank",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#11110f",
+  "theme_color": "#11110f",
+  "categories": ["photo", "lifestyle"],
+  "icons": [
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Rank photographs",
+      "short_name": "Rank",
+      "url": "/#rank",
+      "icons": [{"src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
+    },
+    {
+      "name": "View collection",
+      "short_name": "Collection",
+      "url": "/#collection",
+      "icons": [{"src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
+    }
+  ]
+}

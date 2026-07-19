@@ -1,0 +1,1 @@
+"""Image Ranker test suite."""
