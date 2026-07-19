@@ -6,6 +6,7 @@ import { Sandbox } from "@vercel/sandbox";
 import { query } from "@/lib/db";
 import { safeErrorMessage } from "@/lib/redaction";
 import { workerSandboxAccess } from "@/lib/sandbox-policy";
+import { WORKER_PYTHON_COMMAND } from "@/lib/worker-runtime";
 
 export type JobKind = "train" | "crawl";
 export type JobStatus =
@@ -254,7 +255,7 @@ async function launch(job: WorkerJob): Promise<WorkerJob> {
       UPDATE worker_jobs SET sandbox_id=${sandbox.name}
        WHERE id=${job.id} AND status='queued'`;
     const command = await sandbox.runCommand({
-      cmd: "python",
+      cmd: WORKER_PYTHON_COMMAND,
       args: ["-m", "hosted_worker.runner", "--job-id", job.id],
       cwd: "/vercel/sandbox",
       detached: true,

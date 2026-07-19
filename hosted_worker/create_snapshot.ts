@@ -1,6 +1,11 @@
 import { Sandbox } from "@vercel/sandbox";
 import { pathToFileURL } from "node:url";
 
+import {
+  WORKER_PYTHON_COMMAND,
+  WORKER_PYTHON_PACKAGES,
+} from "../lib/worker-runtime";
+
 import { safeErrorMessage } from "../lib/redaction";
 
 const REPOSITORY =
@@ -54,7 +59,17 @@ export async function createWorkerSnapshot(): Promise<string> {
   });
   let snapshotted = false;
   try {
-    await checked(sandbox, "python", [
+    // Vercel's small built-in Python omits compiled stdlib modules (including
+    // bz2/sqlite) imported transitively by TorchVision. Bake Amazon Linux's
+    // complete Python into the snapshot instead of patching individual imports.
+    await checked(sandbox, "sudo", [
+      "dnf",
+      "install",
+      "-y",
+      ...WORKER_PYTHON_PACKAGES,
+    ]);
+    await checked(sandbox, "sudo", [
+      WORKER_PYTHON_COMMAND,
       "-m",
       "pip",
       "install",
@@ -62,22 +77,18 @@ export async function createWorkerSnapshot(): Promise<string> {
       "--no-cache-dir",
       "-r",
       "hosted_worker/requirements.txt",
-    ]);
-    await checked(sandbox, "python", [
-      "-m",
-      "pip",
-      "install",
-      "--disable-pip-version-check",
-      "--no-cache-dir",
       "-e",
       ".[ml]",
     ]);
     // Initializes the exact frozen encoder and bakes its weights into the
     // reusable snapshot; ordinary jobs perform no dependency/model download.
-    await checked(sandbox, "python", ["-m", "hosted_worker.selfcheck"]);
+    await checked(sandbox, WORKER_PYTHON_COMMAND, [
+      "-m",
+      "hosted_worker.selfcheck",
+    ]);
     await checked(
       sandbox,
-      "python",
+      WORKER_PYTHON_COMMAND,
       [
         "-c",
         "from image_ranker.ml import _OpenClipRuntime; _OpenClipRuntime(device='cpu')",

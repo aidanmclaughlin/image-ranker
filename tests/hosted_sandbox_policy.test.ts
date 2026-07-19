@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 
@@ -7,6 +8,10 @@ import {
   isDirectExecution,
 } from "../hosted_worker/create_snapshot";
 import { workerSandboxAccess } from "../lib/sandbox-policy";
+import {
+  WORKER_PYTHON_COMMAND,
+  WORKER_PYTHON_PACKAGES,
+} from "../lib/worker-runtime";
 
 
 const DATABASE = "postgresql://worker:secret@ep-lumen.us-west-2.aws.neon.tech/app";
@@ -66,4 +71,16 @@ test("snapshot creation requires an immutable SHA and handles spaced paths", () 
   assert.throws(() => immutableGitRevision("main"));
   const path = "/tmp/Image Ranker/hosted_worker/create_snapshot.ts";
   assert.equal(isDirectExecution(pathToFileURL(path).href, path), true);
+});
+
+test("snapshot and job runner share a complete system Python", async () => {
+  assert.equal(WORKER_PYTHON_COMMAND, "python3.12");
+  assert.deepEqual(WORKER_PYTHON_PACKAGES, ["python3.12", "python3.12-pip"]);
+  const [snapshotSource, jobsSource] = await Promise.all([
+    readFile(new URL("../hosted_worker/create_snapshot.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/jobs.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(snapshotSource, /WORKER_PYTHON_COMMAND/);
+  assert.match(snapshotSource, /WORKER_PYTHON_PACKAGES/);
+  assert.match(jobsSource, /cmd: WORKER_PYTHON_COMMAND/);
 });
