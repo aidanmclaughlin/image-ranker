@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import json
 import math
-import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import sqlite3
 
 
 MODEL_NAME = "ViT-B-32"
@@ -613,6 +615,8 @@ def score_images(
     device: Optional[str] = None,
 ) -> dict[int, float]:
     """Score database images by id, populating the SQLite embedding cache."""
+    import sqlite3
+
     head = load_preference_head(_artifact_path(Path(models_dir_or_artifact)))
     if head.encoder != ENCODER:
         raise RuntimeError(f"artifact expects encoder {head.encoder}, but this build provides {ENCODER}")
@@ -660,6 +664,8 @@ def train(
     device: Optional[str] = None,
 ) -> dict[str, Any]:
     """Train and persist a frozen-OpenCLIP Bradley--Terry preference model."""
+    import sqlite3
+
     conn = sqlite3.connect(database)
     conn.row_factory = sqlite3.Row
     try:

@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -36,6 +37,25 @@ from image_ranker.ml import PreferenceHead
 
 
 class HostedWorkerTests(unittest.TestCase):
+    def test_hosted_ml_import_does_not_require_sqlite_extension(self):
+        script = """
+import builtins
+real_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == "sqlite3":
+        raise ModuleNotFoundError("sqlite3 is unavailable")
+    return real_import(name, *args, **kwargs)
+builtins.__import__ = guarded_import
+import image_ranker.ml
+"""
+        subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parent.parent,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
     def test_model_artifact_path_is_content_addressed(self):
         first = _model_blob_path("google-sub", 20, b"artifact-a")
         repeated = _model_blob_path("google-sub", 20, b"artifact-a")
