@@ -1,6 +1,6 @@
 "use strict";
 
-const SHELL_CACHE = "lumen-shell-v2";
+const SHELL_CACHE = "lumen-shell-v3";
 const SHELL_FILES = [
   "/",
   "/index.html",
@@ -9,6 +9,10 @@ const SHELL_FILES = [
   "/manifest.webmanifest",
   "/icons/icon.svg",
   "/icons/maskable.svg",
+  "/icons/apple-touch-icon.png",
+  "/icons/icon-192.png",
+  "/icons/icon-512.png",
+  "/icons/maskable-512.png",
 ];
 const PRIVATE_PATH = /^\/(?:api|media|thumb)(?:\/|$)/;
 

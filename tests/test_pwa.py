@@ -15,12 +15,21 @@ class PwaTests(unittest.TestCase):
         self.assertEqual(manifest["start_url"], "/#rank")
         self.assertEqual(manifest["scope"], "/")
         self.assertTrue(any(icon["purpose"] == "maskable" for icon in manifest["icons"]))
+        png_sizes = {
+            icon.get("sizes") for icon in manifest["icons"] if icon.get("type") == "image/png"
+        }
+        self.assertTrue({"192x192", "512x512"}.issubset(png_sizes))
         self.assertNotIn("screenshots", manifest)
 
         for icon in manifest["icons"]:
             path = WEB / icon["src"].removeprefix("/")
             self.assertTrue(path.is_file())
-            ET.parse(path)
+            if path.suffix == ".svg":
+                ET.parse(path)
+
+        index = (WEB / "index.html").read_text()
+        self.assertIn('rel="apple-touch-icon"', index)
+        self.assertTrue((WEB / "icons" / "apple-touch-icon.png").is_file())
 
     def test_service_worker_caches_shell_but_not_private_data(self):
         worker = (WEB / "service-worker.js").read_text()
