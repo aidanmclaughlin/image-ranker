@@ -847,7 +847,7 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
 
             {leaderboardState === "empty" ? (
               <div className="collection-empty">
-                <p>No images yet. Import the first batch, then start ranking.</p>
+                <p>No ranked images yet. Make your first choice to begin your collection.</p>
                 <button className="text-button" type="button" onClick={() => selectView("rank")}>
                   Return to ranking
                 </button>
