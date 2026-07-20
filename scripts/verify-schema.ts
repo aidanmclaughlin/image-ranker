@@ -84,6 +84,26 @@ async function main(): Promise<void> {
     if (state.rows[0]?.comparisons !== 1 || state.rows[0]?.matches !== 2) {
       throw new Error("Comparison replay changed Elo state twice");
     }
+    const job = await client.query<{ id: string }>(
+      `INSERT INTO worker_jobs(user_id,kind,status,input_json,output_json)
+       VALUES($1,'crawl','succeeded','{}'::jsonb,'{}'::jsonb)
+       RETURNING id::text`,
+      [userId],
+    );
+    const action = await client.query<{ id: string }>(
+      `INSERT INTO crawl_bandit_actions(
+         user_id,worker_job_id,action_index,arm,policy_version,propensity,
+         status,proxy_reward,effective_reward,candidates_seen,candidates_eligible
+       ) VALUES($1,$2,0,'test-arm','schema-smoke',1.0,'observed',0.5,0.5,1,1)
+       RETURNING id::text`,
+      [userId, job.rows[0].id],
+    );
+    await client.query(
+      `INSERT INTO crawl_bandit_discoveries(
+         user_id,action_id,image_id,candidate_proxy_reward
+       ) VALUES($1,$2,$3,0.5)`,
+      [userId, action.rows[0].id, imageIds[0]],
+    );
     console.log("Hosted schema transaction smoke test passed");
   } finally {
     await client.query("ROLLBACK").catch(() => undefined);

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  latestTrainingTarget,
   nextTrainingTarget,
   trainingIsDue,
 } from "../lib/training-cadence";
@@ -16,6 +17,14 @@ test("training uses dense early milestones and sparse mature milestones", () => 
   assert.equal(nextTrainingTarget(100), 150);
   assert.equal(nextTrainingTarget(120), 150);
   assert.equal(nextTrainingTarget(150), 200);
+});
+
+test("training skips redundant milestones after a label-count leap", () => {
+  assert.equal(latestTrainingTarget(19, null), 20);
+  assert.equal(latestTrainingTarget(94, null), 80);
+  assert.equal(latestTrainingTarget(94, 20), 80);
+  assert.equal(latestTrainingTarget(149, 40), 100);
+  assert.equal(latestTrainingTarget(260, 100), 250);
 });
 
 test("training becomes due exactly at each next milestone", () => {
@@ -37,4 +46,5 @@ test("training becomes due exactly at each next milestone", () => {
 test("invalid prior model counts are rejected", () => {
   assert.throws(() => nextTrainingTarget(-1), RangeError);
   assert.throws(() => nextTrainingTarget(1.5), RangeError);
+  assert.throws(() => latestTrainingTarget(-1, null), RangeError);
 });

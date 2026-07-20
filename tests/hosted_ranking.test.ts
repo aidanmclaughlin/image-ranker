@@ -95,6 +95,11 @@ test("schema enforces replay-safe comparisons and worker concurrency", async () 
   assert.match(schema, /idx_worker_jobs_single_active/);
   assert.match(schema, /idx_worker_jobs_crawl_day/);
   assert.match(schema, /idx_worker_jobs_train_cutoff_day/);
+  assert.match(schema, /CREATE TABLE IF NOT EXISTS crawl_bandit_actions/);
+  assert.match(schema, /propensity > 0 AND propensity <= 1/);
+  assert.match(schema, /proxy_reward BETWEEN 0 AND 1/);
+  assert.match(schema, /CREATE TABLE IF NOT EXISTS crawl_bandit_discoveries/);
+  assert.match(schema, /REFERENCES crawl_bandit_actions\(user_id, id\)/);
   assert.match(
     schema,
     /input_json->>'comparison_cutoff'[\s\S]+input_json->>'run_day'/,

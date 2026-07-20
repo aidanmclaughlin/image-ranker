@@ -7,7 +7,7 @@ import { query } from "@/lib/db";
 import { safeErrorMessage } from "@/lib/redaction";
 import { workerSandboxAccess } from "@/lib/sandbox-policy";
 import {
-  nextTrainingTarget,
+  latestTrainingTarget,
   trainingIsDue,
 } from "@/lib/training-cadence";
 import { WORKER_PYTHON_COMMAND } from "@/lib/worker-runtime";
@@ -83,6 +83,13 @@ async function expireStaleJobs(): Promise<void> {
            finished_at=now()
      WHERE status IN ('queued','running')
        AND created_at < now() - (${STALE_AFTER_MINUTES} * interval '1 minute')`;
+  await query`
+    UPDATE crawl_bandit_actions AS action
+       SET status='failed', completed_at=now()
+      FROM worker_jobs AS job
+     WHERE action.worker_job_id=job.id
+       AND action.status='chosen'
+       AND job.status='failed'`;
 }
 
 async function activeJob(): Promise<WorkerJob | null> {
@@ -113,19 +120,19 @@ async function trainingState(userId: string): Promise<TrainingState> {
      WHERE comparison.user_id=${userId}`;
   const comparisonCount = Number(rows[0]?.comparison_count ?? 0);
   const lastTrainedCount = rows[0]?.last_trained_count;
-  const targetCount = nextTrainingTarget(
+  const normalizedLastTrainedCount =
     lastTrainedCount === null || lastTrainedCount === undefined
       ? null
-      : Number(lastTrainedCount),
+      : Number(lastTrainedCount);
+  const targetCount = latestTrainingTarget(
+    comparisonCount,
+    normalizedLastTrainedCount,
   );
   if (comparisonCount < targetCount) {
     return {
       comparison_count: comparisonCount,
       comparison_cutoff: null,
-      last_trained_count:
-        lastTrainedCount === null || lastTrainedCount === undefined
-          ? null
-          : Number(lastTrainedCount),
+      last_trained_count: normalizedLastTrainedCount,
       target_count: targetCount,
     };
   }
@@ -141,10 +148,7 @@ async function trainingState(userId: string): Promise<TrainingState> {
   return {
     comparison_count: comparisonCount,
     comparison_cutoff: cutoffRows[0]?.comparison_cutoff ?? null,
-    last_trained_count:
-      lastTrainedCount === null || lastTrainedCount === undefined
-        ? null
-        : Number(lastTrainedCount),
+    last_trained_count: normalizedLastTrainedCount,
     target_count: targetCount,
   };
 }
@@ -212,6 +216,10 @@ async function markRunFailed(jobId: string, error: unknown): Promise<void> {
     UPDATE worker_jobs
        SET status='failed', error=${message}, finished_at=now()
      WHERE id=${jobId} AND status IN ('queued','running')`;
+  await query`
+    UPDATE crawl_bandit_actions
+       SET status='failed', completed_at=now()
+     WHERE worker_job_id=${jobId} AND status='chosen'`;
 }
 
 async function persistRunFailure(jobId: string, error: unknown): Promise<void> {

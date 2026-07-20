@@ -38,6 +38,7 @@ PROMOTION_MINIMUM_ACCURACY = 0.50
 PROMOTION_MAX_ACCURACY_REGRESSION = 0.02
 PROMOTION_MAX_LOG_LOSS_REGRESSION = 0.02
 MAX_IMAGE_WORKING_SET = 384
+POSTERIOR_ENSEMBLE_MEMBERS = 8
 
 
 def _model_blob_path(user_id: str, cutoff: int, artifact: bytes) -> str:
@@ -249,12 +250,59 @@ def ensure_hosted_embeddings(
     return cached
 
 
+def _bootstrap_posterior_ensemble(
+    features: np.ndarray,
+    labels: np.ndarray,
+    left_ids: np.ndarray,
+    right_ids: np.ndarray,
+    primary_weights: np.ndarray,
+    limits: WorkerLimits,
+) -> tuple[np.ndarray, int]:
+    """Approximate epistemic uncertainty with deterministic pair-group bootstrap."""
+    groups: dict[tuple[int, int], list[int]] = {}
+    for index, (left_id, right_id) in enumerate(zip(left_ids, right_ids)):
+        pair = (int(min(left_id, right_id)), int(max(left_id, right_id)))
+        groups.setdefault(pair, []).append(index)
+    ordered_groups = list(groups.values())
+    digest = hashlib.sha256()
+    digest.update(np.asarray(features, dtype="<f4").tobytes(order="C"))
+    digest.update(np.asarray(labels, dtype=np.uint8).tobytes(order="C"))
+    seed = int.from_bytes(digest.digest()[:8], "big", signed=False)
+    rng = np.random.default_rng(seed)
+    members = [np.asarray(primary_weights, dtype=np.float32)]
+    for _ in range(POSTERIOR_ENSEMBLE_MEMBERS - 1):
+        sampled_groups = rng.integers(
+            0,
+            len(ordered_groups),
+            size=len(ordered_groups),
+        )
+        indices = np.asarray(
+            [
+                index
+                for group_index in sampled_groups
+                for index in ordered_groups[int(group_index)]
+            ],
+            dtype=np.int64,
+        )
+        weights, _ = fit_bradley_terry(
+            features[indices],
+            labels[indices],
+            epochs=limits.epochs,
+            device="cpu",
+        )
+        members.append(weights)
+    ensemble = np.stack(members).astype(np.float32, copy=False)
+    if ensemble.shape != (POSTERIOR_ENSEMBLE_MEMBERS, features.shape[1]):
+        raise RuntimeError("preference posterior ensemble has an unexpected shape")
+    return ensemble, seed
+
+
 def _fit(
     comparisons: Sequence[Mapping[str, Any]],
     embeddings: Mapping[int, np.ndarray],
     limits: WorkerLimits,
     prior_head: PreferenceHead | None,
-) -> tuple[PreferenceHead, dict[str, Any]]:
+) -> tuple[PreferenceHead, dict[str, Any], np.ndarray]:
     try:
         import torch
 
@@ -326,6 +374,14 @@ def _fit(
         device="cpu",
     )
     training = binary_metrics(labels, sigmoid(features @ weights))
+    ensemble_weights, ensemble_seed = _bootstrap_posterior_ensemble(
+        features,
+        labels,
+        left_ids,
+        right_ids,
+        weights,
+        limits,
+    )
     trained_at = datetime.now(timezone.utc).isoformat()
     metrics = {
         "encoder": hosted_encoder_id(),
@@ -339,6 +395,11 @@ def _fit(
         "l2": 0.01,
         "device": "cpu",
         "trained_at": trained_at,
+        "uncertainty": {
+            "method": "pair_group_bootstrap_v1",
+            "members": POSTERIOR_ENSEMBLE_MEMBERS,
+            "seed": ensemble_seed,
+        },
         "promotion": {
             "promoted": promoted,
             "reason": promotion_reason,
@@ -355,9 +416,13 @@ def _fit(
             "pretrained": PRETRAINED,
             "metrics": metrics,
             "trained_at": trained_at,
+            "ensemble_weights": [
+                [float(value) for value in member]
+                for member in ensemble_weights
+            ],
         },
     )
-    return head, metrics
+    return head, metrics, ensemble_weights
 
 
 def _load_promoted_head(connection: Any, user_id: str) -> PreferenceHead | None:
@@ -390,6 +455,7 @@ def _persist_model(
     cutoff: int,
     comparison_count: int,
     head: PreferenceHead,
+    ensemble_weights: np.ndarray,
     metrics: Mapping[str, Any],
     promoted: bool,
     promotion_reason: str,
@@ -408,6 +474,11 @@ def _persist_model(
         "encoder": head.encoder,
         "dimensions": head.dimensions,
         "weights": [float(value) for value in head.weights],
+        "ensemble_weights": [
+            [float(value) for value in member]
+            for member in np.asarray(ensemble_weights, dtype=np.float32)
+        ],
+        "uncertainty_method": "pair_group_bootstrap_v1",
     }
     with connection.cursor() as cursor:
         cursor.execute(
@@ -494,7 +565,9 @@ def train_job(
     embeddings = ensure_hosted_embeddings(connection, image_rows, limits)
     prior_head = _load_promoted_head(connection, user_id)
     connection.commit()
-    head, metrics = _fit(comparisons, embeddings, limits, prior_head)
+    head, metrics, ensemble_weights = _fit(
+        comparisons, embeddings, limits, prior_head
+    )
     promotion = metrics["promotion"]
     promoted = bool(promotion["promoted"])
     promotion_reason = str(promotion["reason"])
@@ -513,6 +586,7 @@ def train_job(
         cutoff=cutoff,
         comparison_count=total_count,
         head=head,
+        ensemble_weights=ensemble_weights,
         metrics=metrics,
         promoted=promoted,
         promotion_reason=promotion_reason,

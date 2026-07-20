@@ -50,8 +50,23 @@ test("hosted ranking is an immersive surface with direct collection access", asy
   assert.doesNotMatch(component, /requestFullscreen|exitFullscreen|fullscreenchange/);
   assert.doesNotMatch(component, />Fullscreen</);
   assert.match(component, /className="rank-control-button rank-list-button"/);
-  assert.match(component, />Ranked list</);
+  assert.match(component, /className="visually-hidden">Ranked list</);
   assert.match(component, /className="view rank-view hosted-rank-view"/);
   assert.match(styles, /\.rank-main\s*\{[\s\S]*?height:\s*100dvh[\s\S]*?padding-top:\s*0/);
   assert.match(styles, /\.hosted-rank-view\s*\{[\s\S]*?height:\s*100dvh[\s\S]*?overflow:\s*hidden/);
+});
+
+test("hosted ranking keeps all text off the visual comparison surface", async () => {
+  const [component, styles] = await Promise.all([
+    readFile(new URL("../components/lumen-app.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.doesNotMatch(component, /className="candidate-(?:number|caption|title|credit)"/);
+  assert.doesNotMatch(component, /className="(?:key-chip|focus-label|instruction-bar|rank-session-status)"/);
+  assert.doesNotMatch(component, /<div className="versus"[^>]*>\s*<span/);
+  assert.match(component, /className="visually-hidden">Lumen</);
+  assert.match(component, /className="visually-hidden">Skip</);
+  assert.match(component, /className="visually-hidden">Ranked list</);
+  assert.match(styles, /\.hosted-rank-view \.account-avatar\s*\{[\s\S]*?font-size:\s*0/);
 });

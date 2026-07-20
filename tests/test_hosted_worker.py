@@ -21,6 +21,7 @@ from hosted_worker.blob_store import (
     upload_image,
     upload_private_blob,
 )
+from hosted_worker.bandit import BanditDecision
 from hosted_worker.config import WorkerLimits
 from hosted_worker.crawler import (
     Candidate,
@@ -33,7 +34,11 @@ from hosted_worker.crawler import (
 )
 from hosted_worker.runner import dispatch
 from hosted_worker.selfcheck import _model_state_digest
-from hosted_worker.training import _bounded_participant_window, _model_blob_path
+from hosted_worker.training import (
+    _bootstrap_posterior_ensemble,
+    _bounded_participant_window,
+    _model_blob_path,
+)
 from image_ranker.ml import PreferenceHead
 
 
@@ -330,9 +335,9 @@ import image_ranker.ml
             return [{"provider_page_id": 1}], token
 
         pages = _frontier_pages(frontier, 1, request_delay=0, page_loader=first_loader)
-        page, exhausted = next(pages)
-        self.assertEqual(page[0]["provider_page_id"], 1)
-        self.assertFalse(exhausted)
+        result = next(pages)
+        self.assertEqual(result.pages[0]["provider_page_id"], 1)
+        self.assertFalse(result.exhausted)
         self.assertEqual(frontier["continuations"][category], token)
         self.assertEqual(frontier["next_category"], 1)
 
@@ -343,11 +348,11 @@ import image_ranker.ml
             self.assertEqual(dict(continuation), token)
             return [{"provider_page_id": 2}], None
 
-        page, exhausted = next(
+        result = next(
             _frontier_pages(frontier, 1, request_delay=0, page_loader=resumed_loader)
         )
-        self.assertEqual(page[0]["provider_page_id"], 2)
-        self.assertTrue(exhausted)
+        self.assertEqual(result.pages[0]["provider_page_id"], 2)
+        self.assertTrue(result.exhausted)
         self.assertEqual(frontier["continuations"][category], {})
         self.assertEqual(len(calls), 2)
 
@@ -359,12 +364,83 @@ import image_ranker.ml
             calls.append(name)
             return [], None
 
-        self.assertEqual(
-            list(_frontier_pages(frontier, 100, request_delay=0, page_loader=empty_loader)),
-            [],
+        results = list(
+            _frontier_pages(frontier, 100, request_delay=0, page_loader=empty_loader)
         )
+        self.assertEqual(len(results), len(frontier["categories"]))
+        self.assertTrue(all(not result.pages for result in results))
         self.assertEqual(calls, frontier["categories"])
         self.assertEqual(frontier["next_category"], 0)
+
+    def test_bandit_frontier_preserves_per_category_continuations(self):
+        frontier = _initial_frontier()
+        first, second = frontier["categories"][:2]
+        selected = iter((first, first, second))
+        calls = []
+        started = []
+
+        def selector(available):
+            arm = next(selected)
+            self.assertIn(arm, available)
+            return BanditDecision(arm, 0.5, {arm: 0.5})
+
+        def starter(index, decision):
+            started.append((index, decision.arm))
+            return index + 10
+
+        def loader(name, continuation, limit, delay):
+            calls.append((name, dict(continuation), limit, delay))
+            if name == first and not continuation:
+                return [{"provider_page_id": len(calls)}], {"cursor": "next"}
+            return [{"provider_page_id": len(calls)}], None
+
+        results = list(
+            _frontier_pages(
+                frontier,
+                3,
+                request_delay=0,
+                page_loader=loader,
+                arm_selector=selector,
+                action_starter=starter,
+            )
+        )
+        self.assertEqual([result.action_id for result in results], [10, 11, 12])
+        self.assertEqual(started, [(0, first), (1, first), (2, second)])
+        self.assertEqual(calls[0][1], {})
+        self.assertEqual(calls[1][1], {"cursor": "next"})
+        self.assertEqual(calls[2][1], {})
+        self.assertEqual(frontier["continuations"][first], {})
+        self.assertEqual(frontier["continuations"][second], {})
+
+    def test_bandit_frontier_does_not_rescan_a_final_nonempty_page(self):
+        frontier = _initial_frontier()
+        first, second = frontier["categories"][:2]
+        selected = []
+
+        def selector(available):
+            arm = first if first in available else second
+            selected.append((arm, tuple(available)))
+            return BanditDecision(arm, 1.0 / len(available), {arm: 1.0})
+
+        def starter(index, _decision):
+            return index + 20
+
+        def loader(name, _continuation, _limit, _delay):
+            return [{"provider_page_id": len(selected)}], None
+
+        results = list(
+            _frontier_pages(
+                frontier,
+                2,
+                request_delay=0,
+                page_loader=loader,
+                arm_selector=selector,
+                action_starter=starter,
+            )
+        )
+        self.assertEqual([result.pages[0]["provider_page_id"] for result in results], [1, 2])
+        self.assertEqual([arm for arm, _available in selected], [first, second])
+        self.assertNotIn(first, selected[1][1])
 
     def test_training_window_bounds_participants_without_library_failure(self):
         comparisons = [
@@ -374,6 +450,31 @@ import image_ranker.ml
         selected, participants = _bounded_participant_window(comparisons, 2)
         self.assertEqual(len(selected), 20)
         self.assertEqual(participants, [101, 102])
+
+    def test_group_bootstrap_uncertainty_is_reproducible(self):
+        features = np.asarray(
+            [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]],
+            dtype=np.float32,
+        )
+        labels = np.asarray([1.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        left = np.asarray([1, 1, 3, 3], dtype=np.int64)
+        right = np.asarray([2, 2, 4, 4], dtype=np.int64)
+        primary = np.asarray([0.25, -0.25], dtype=np.float32)
+
+        def fake_fit(sample, _labels, **_kwargs):
+            return np.mean(sample, axis=0).astype(np.float32), 0.0
+
+        with patch("hosted_worker.training.fit_bradley_terry", side_effect=fake_fit):
+            first, first_seed = _bootstrap_posterior_ensemble(
+                features, labels, left, right, primary, WorkerLimits(epochs=1)
+            )
+            second, second_seed = _bootstrap_posterior_ensemble(
+                features, labels, left, right, primary, WorkerLimits(epochs=1)
+            )
+        self.assertEqual(first.shape, (8, 2))
+        np.testing.assert_array_equal(first, second)
+        np.testing.assert_array_equal(first[0], primary)
+        self.assertEqual(first_seed, second_seed)
 
     def test_limits_can_only_be_lowered_within_hard_caps(self):
         with patch.dict(

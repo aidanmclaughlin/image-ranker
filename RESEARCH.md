@@ -204,7 +204,83 @@ Source metadata and text-aligned embeddings can expand queries from the user's s
 
 The scheduler should maintain explicit budgets for exploitation, uncertainty, random exploration, new sources, underrepresented embedding clusters, and underrepresented creators. Without those budgets, a taste model trained on its own selected data creates a feedback loop: it sees more of what it already understands, becomes more confident there, and mistakes narrowness for taste.
 
-## 9. Evaluation and leakage control
+## 9. Source-selection bandit: the implemented RL system
+
+The crawler's first learned controller is intentionally a **multi-armed bandit**, the one-step edge of reinforcement learning, rather than a deep RL agent. Each arm is a rights-clean Wikimedia source category; an action chooses which category's next API page to inspect; and only that page's result is observed. Advancing an opaque continuation token is persistent state, but the present action does not yet expose a learnable, validated long-horizon transition model. Calling this an MDP and fitting a deep policy would add unsupported credit assignment rather than useful intelligence.
+
+This separation is important: the personal Bradley–Terry vision model estimates image utility, while the crawler bandit learns **where that model tends to find unusually strong candidates**. Neither source metadata nor bandit reward is turned into a preference label. Rights, decode, resolution, byte, corruption, and deduplication checks remain hard gates outside the learned policy, so reward optimization cannot trade them away.
+
+### Why discounted EXP3-IX is the current choice
+
+The source problem has a small discrete action set, bandit-only feedback, very few daily actions, changing provider contents, and a reward model that changes as the owner labels more images. These properties favor a small adversarial bandit over a high-capacity stochastic controller. EXP3 supplies the exponential-weights foundation for non-stochastic rewards ([Auer et al., 2002](https://www.schapire.net/papers/AuerCeFrSc01.pdf)); EXP3-IX stabilizes importance-weighted feedback through implicit exploration ([Neu, 2015](https://proceedings.neurips.cc/paper/2015/hash/e5a4d6bf330f23a8707bb0d6001dfbe8-Abstract.html)); and discounting is a standard way to emphasize recent evidence when bandit rewards change ([Garivier & Moulines, 2011](https://arxiv.org/abs/0805.3415)). The shipped policy is an engineering combination of those ideas, not a claim that their individual regret theorems apply unchanged to this proxy-reward crawler.
+
+For available categories \(A_t\), the worker replays at most 4,096 completed observations. Before each replayed observation it discounts every log weight by \(0.995\). With
+
+\[
+\eta_t=\min\left(0.25,\sqrt{\frac{\log K}{K t}}\right),\qquad
+\gamma_t=\eta_t/2,
+\]
+
+the chosen arm receives the bounded reward estimate \(\eta_t r_t/(p_t+\gamma_t)\). The next source distribution is a softmax over those log weights mixed with 20% uniform exploration:
+
+\[
+p_t(a)=0.8\,\frac{\exp(w_a)}{\sum_{j\in A_t}\exp(w_j)}
+       +\frac{0.2}{|A_t|}.
+\]
+
+The explicit 20% mixture is deliberately retained even though IX already regularizes the estimator: it guarantees continuing source coverage, bounds every available arm away from zero, and creates overlap for later counterfactual evaluation. Exhausted categories are removed from that round's available set and probabilities are renormalized over the rest.
+
+### Extreme, anchor-relative reward
+
+The product objective is not to find the source with the best *average* photograph; it is to discover exceptional photographs. The max-K-armed or “extreme bandit” literature formalizes objectives based on the best sampled reward ([Cicirello & Smith, 2005](https://www.cicirello.org/publications/cicirello2005aaai.html)), but also shows that universal extreme-regret guarantees are impossible without tail and oracle assumptions ([Nishihara, Lopez-Paz & Bottou, 2016](https://proceedings.mlr.press/v51/nishihara16.html)). Lumen therefore uses the maximum eligible reward on a fully evaluated fetched page as a transparent product-aligned objective, not as a theorem-backed optimal extreme-bandit algorithm. An observed page with no eligible candidates receives zero; only a page genuinely truncated by a pool or download cap is marked censored and excluded from policy learning. Deterministic top-k non-selection is not censoring, which avoids learning only from the candidates that survived selection.
+
+The proxy reward is relative to the owner's strongest sufficiently judged images, not a raw utility whose scale changes arbitrarily between training runs. A promoted model becomes eligible at 40 comparisons, and activation additionally requires at least four live anchor images with three or more human matches each. The worker takes up to eight highest-Elo qualifying anchors and the eight pair-group-bootstrap preference heads persisted with the model. For an imported candidate \(x\) and ensemble member \(b\),
+
+\[
+q_b(x)=\frac{1}{M}\sum_{m=1}^{M}
+\sigma\!\left(s_b(x)-s_b(a_m)\right),\qquad
+r_{\text{proxy}}(x)=Q_{0.10}\{q_b(x)\}_{b=1}^{8}.
+\]
+
+Thus the score means “a pessimistic estimate of the probability that this candidate beats a random current top anchor.” An action's reward is the maximum score among all of that action's technically eligible, deduplicated candidates, whether or not the final bounded batch imports that candidate. Taking the bootstrap ensemble's 10th percentile reduces the chance that one unstable low-data fit sends the crawler toward an unsupported region; ensemble uncertainty is a practical, well-tested predictive-uncertainty baseline ([Lakshminarayanan, Pritzel & Blundell, 2017](https://proceedings.neurips.cc/paper_files/paper/2017/hash/9ef2ed4b7fd2c810847ffa5fa85bce38-Abstract.html)). The quantile and anchor ladder remain engineering choices to validate against eventual human discovery yield.
+
+### Delayed human correction
+
+Proxy reward lets the source policy learn before a newly found image has enough comparisons, but the user's later choices remain authoritative. Every imported candidate is linked to the source action that discovered it. Below three matches the action retains its proxy reward. From three through eight matches, the worker blends the proxy with the candidate's expected Elo win probability against the current anchor ladder using confidence \(c=\min(1,m/8)\):
+
+\[
+r_{\text{effective}}=(1-c)r_{\text{proxy}}+c\,r_{\text{human}}.
+\]
+
+At eight matches the human-relative reward fully replaces the proxy. Human correction occurs only if the exact maximum-proxy candidate entered the collection; a non-imported reward winner keeps its proxy instead of borrowing feedback from a different image. When correction is possible, only that image's later Elo is used, and it is compared with the action's stored anchor identities using their contemporaneous Elo values. This keeps proxy and human feedback on one estimand instead of silently switching images or anchor cohorts. These delayed corrections are refreshed before the next crawl and the bounded policy history is replayed; no synthetic pairwise labels are created. Delayed bandit feedback is a distinct statistical problem ([Joulani, György & Szepesvári, 2013](https://proceedings.mlr.press/v28/joulani13.html)), so this progressive replacement should be evaluated empirically rather than described as a direct implementation of that paper's delay model.
+
+### Exact logging, exploration, and off-policy evaluation
+
+Every source action durably records the selected arm, its exact behavior propensity, the complete probability map over the then-available arms, policy version, model-run ID, anchor IDs, action index, outcome status, candidate counts, proxy reward, later human reward, and effective reward. Failed and censored actions are retained for audit but excluded from reward replay. This makes the behavior policy reconstructible and, because every available category has positive probability, provides the support needed for inverse-propensity, self-normalized, or doubly robust evaluation. Propensity logging is necessary but not sufficient: offline estimates still need adequate overlap, controlled variance, and a fixed reward definition ([Li et al., 2011](https://arxiv.org/abs/1003.5956); [Dudík, Langford & Li, 2011](https://arxiv.org/abs/1103.4601); [Wang, Agarwal & Dudík, 2017](https://proceedings.mlr.press/v70/wang17a.html)).
+
+No off-policy estimator is promoted automatically yet. With this single user's small stream, policy comparisons must wait for useful effective sample size, be stratified by reward-model version, report clipped-weight sensitivity and confidence intervals, and ultimately use mature human-corrected discovery outcomes. The source logs support that future evaluation; they do not make a handful of actions conclusive.
+
+Source exploration and candidate exploration are separate controls:
+
+- **20% source exploration** is truly randomized and propensity-logged in the behavior distribution above.
+- **20% candidate exploration** reserves at least one slot in each model-guided import batch and chooses it by a reproducible daily hash from candidates outside the taste-ranked exploitation prefix. This protects diversity, but it is not a randomized, propensity-logged candidate policy and therefore is not yet suitable for candidate-level off-policy claims.
+
+### Why not PPO, DQN, or NeuralUCB yet
+
+| System | What the primary work assumes or provides | Why it is not the current controller |
+|---|---|---|
+| **PPO** | An on-policy policy-gradient method that alternates environment sampling with multiple epochs on a clipped surrogate objective ([Schulman et al., 2017](https://arxiv.org/abs/1707.06347)). | Five imports per day cannot supply the volume of on-policy trajectories a neural policy needs, and the present crawl has no validated long-horizon return for PPO to optimize. |
+| **DQN** | Value learning from replayed transitions in an MDP, demonstrated at scale on Atari frames and game rewards ([Mnih et al., 2015](https://www.nature.com/articles/nature14236)). | Lumen currently observes one source page's bandit reward, not dense reusable state-transition experience; bootstrapped Q-values would add severe sample and representation error. |
+| **NeuralUCB** | A neural contextual bandit with UCB exploration under a bounded stochastic reward-function setup ([Zhou, Li & Gu, 2020](https://proceedings.mlr.press/v119/zhou20a.html)). | It becomes attractive when thousands of changing links can share stable context features, but today there are few named category arms, little feedback, and non-stationarity from both taste-model updates and moving provider contents. |
+| **Discounted EXP3-IX** | Small adversarial bandit with implicit importance regularization, explicit coverage, and recency weighting. | It matches the data actually available, is cheap enough to replay exactly, exposes every action probability, and can be replaced only after logged evidence supports a richer policy. |
+
+### Future: sleeping, contextual link-frontier learning
+
+The next justified expansion is not immediately deep RL; it is a **sleeping contextual bandit** over frontier links. Individual categories, providers, searches, and links appear, expire, exhaust, or become temporarily unavailable—precisely the changing-action-set setting studied by sleeping bandits ([Kanade, McMahan & Bryan, 2009](https://proceedings.mlr.press/v5/kanade09a.html); [Saha, Gaillard & Valko, 2020](https://proceedings.mlr.press/v119/saha20a.html)). Each available link should carry pre-fetch context such as provider and category, frontier depth, rights confidence, text/CLIP query embedding, creator novelty, recent domain yield, estimated bytes, and request cost. A linear contextual policy should be the first challenger; NeuralUCB is warranted only if nonlinear held-out gains justify its capacity.
+
+That frontier must log the full available action set, feature version, selected-link propensity, fetch cost, continuation mutation, censoring, and delayed image outcomes. Offline IPS/SNIPS/DR estimates and a shadow replay should beat discounted EXP3-IX on mature human discovery yield before promotion. Only if link choices demonstrably change valuable future reachable states—and enough complete trajectories exist to learn that effect—should the crawler be upgraded from a contextual bandit to an MDP and benchmark PPO, DQN, or a graph-specific RL method.
+
+## 10. Evaluation and leakage control
 
 ### Three questions require three splits
 
@@ -234,7 +310,7 @@ Use validation folds for encoder, regularization, acquisition, and calibration c
 
 Deduplicate before splitting, keep metadata out of the personal visual head, maintain a random audit stream, and record all split logic in the private model manifest.
 
-## 10. Chosen v1 design and tradeoffs
+## 11. Chosen v1 design and tradeoffs
 
 | Decision | v1 choice | Reason | Revisit when |
 |---|---|---|---|
@@ -245,9 +321,9 @@ Deduplicate before splitting, keep metadata out of the personal visual head, mai
 | Active queries | Entropy + ensemble disagreement + graph repair + exploration, then batch diversity | Balances learnability, connectivity, and novelty. | Logged ablations show a better allocation. |
 | Generic aesthetics | Soft intake prior only | Removes obvious low-value tail without overwriting personal taste. | Its incremental discovery yield is proven on random audits. |
 | Fine-tuning | Frozen encoder | Hundreds of labels cannot safely support millions of adapted weights. | Several thousand diverse labels and all promotion gates pass. |
-| Crawling | Official, rights-explicit provider adapters | Reproducible metadata, controllable rate limits, and auditable licenses. | A new provider offers an equally explicit compatible API. |
+| Crawling | Rights-explicit adapters plus discounted EXP3-IX source selection | Preserves auditable licenses while learning which source category yields extreme anchor-relative reward. | Logged OPE supports a sleeping contextual link policy. |
 
-## 11. Rights-aware sourcing
+## 12. Rights-aware sourcing
 
 Rights metadata is part of model data integrity, not an afterthought. A URL, public accessibility, award, social-media post, or `robots.txt` allowance does not grant copyright permission. The [Robots Exclusion Protocol](https://www.rfc-editor.org/rfc/rfc9309.html) controls crawler access; it is not a content license.
 
@@ -265,7 +341,7 @@ National Geographic, Instagram, photography competitions, and photographers' own
 
 For every displayed image, preserve creator, title, source link, license name/link, and any required attribution. CC0 still benefits from provenance. CC BY and CC BY-SA require compliance with their exact terms; do not normalize distinct licenses into a generic “free” flag. This is engineering guidance, not legal advice.
 
-## 12. Primary-source reading list
+## 13. Primary-source reading list
 
 ### Preference and ranking
 
@@ -295,3 +371,21 @@ For every displayed image, preserve creator, title, source link, license name/li
 - Biyik & Sadigh, [*Batch Active Preference-Based Learning of Reward Functions*](https://proceedings.mlr.press/v87/biyik18a.html) (CoRL 2018).
 - Lakshminarayanan, Pritzel & Blundell, [*Simple and Scalable Predictive Uncertainty Estimation Using Deep Ensembles*](https://proceedings.neurips.cc/paper_files/paper/2017/hash/9ef2ed4b7fd2c810847ffa5fa85bce38-Abstract.html) (NeurIPS 2017).
 - Hu et al., [*LoRA: Low-Rank Adaptation of Large Language Models*](https://openreview.net/forum?id=nZeVKeeFYf9) (ICLR 2022); relevant as an adaptation mechanism, not evidence that vision-encoder tuning will help this task.
+
+### Bandits, reinforcement learning, and counterfactual evaluation
+
+- Auer et al., [*The Nonstochastic Multiarmed Bandit Problem*](https://www.schapire.net/papers/AuerCeFrSc01.pdf) (SIAM Journal on Computing, 2002).
+- Neu, [*Explore No More: Improved High-Probability Regret Bounds for Non-Stochastic Bandits*](https://proceedings.neurips.cc/paper/2015/hash/e5a4d6bf330f23a8707bb0d6001dfbe8-Abstract.html) (NeurIPS 2015).
+- Garivier & Moulines, [*On Upper-Confidence Bound Policies for Non-Stationary Bandit Problems*](https://arxiv.org/abs/0805.3415) (ALT 2011).
+- Cicirello & Smith, [*The Max K-Armed Bandit: A New Model of Exploration Applied to Search Heuristic Selection*](https://www.cicirello.org/publications/cicirello2005aaai.html) (AAAI 2005).
+- Nishihara, Lopez-Paz & Bottou, [*No Regret Bound for Extreme Bandits*](https://proceedings.mlr.press/v51/nishihara16.html) (AISTATS 2016).
+- Joulani, György & Szepesvári, [*Online Learning under Delayed Feedback*](https://proceedings.mlr.press/v28/joulani13.html) (ICML 2013).
+- Li et al., [*A Contextual-Bandit Approach to Personalized News Article Recommendation*](https://arxiv.org/abs/1003.0146) (WWW 2010).
+- Kanade, McMahan & Bryan, [*Sleeping Experts and Bandits with Stochastic Action Availability and Adversarial Rewards*](https://proceedings.mlr.press/v5/kanade09a.html) (AISTATS 2009).
+- Saha, Gaillard & Valko, [*Improved Sleeping Bandits with Stochastic Action Sets and Adversarial Rewards*](https://proceedings.mlr.press/v119/saha20a.html) (ICML 2020).
+- Zhou, Li & Gu, [*Neural Contextual Bandits with UCB-Based Exploration*](https://proceedings.mlr.press/v119/zhou20a.html) (ICML 2020).
+- Li et al., [*Unbiased Offline Evaluation of Contextual-Bandit-Based News Article Recommendation Algorithms*](https://arxiv.org/abs/1003.5956) (WSDM 2011).
+- Dudík, Langford & Li, [*Doubly Robust Policy Evaluation and Learning*](https://arxiv.org/abs/1103.4601) (ICML 2011).
+- Wang, Agarwal & Dudík, [*Optimal and Adaptive Off-Policy Evaluation in Contextual Bandits*](https://proceedings.mlr.press/v70/wang17a.html) (ICML 2017).
+- Mnih et al., [*Human-Level Control through Deep Reinforcement Learning*](https://www.nature.com/articles/nature14236) (Nature, 2015).
+- Schulman et al., [*Proximal Policy Optimization Algorithms*](https://arxiv.org/abs/1707.06347) (2017).

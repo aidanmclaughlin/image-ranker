@@ -8,8 +8,8 @@ The public repository contains only code and documentation. Photographs, compari
 
 ## Product
 
-- Side-by-side, full-screen comparison on desktop and mobile.
-- Arrow keys choose focus, Space confirms, `S` skips, and `F` enters full screen.
+- One side-by-side, full-viewport comparison surface on desktop and mobile, with a direct **Collection** button instead of a second non-immersive mode.
+- Arrow keys choose focus, Space confirms, and `S` skips.
 - Touch either photograph, swipe toward a side to choose it, or swipe up to skip.
 - A collection view orders judged photographs by live Elo and opens the original in a lightbox.
 - A frozen OpenCLIP encoder plus a small Bradley–Terry utility head learns one person's taste from scarce pairwise labels.
@@ -185,7 +185,7 @@ See [scripts/MIGRATION.md](scripts/MIGRATION.md) for the migration-specific chec
 
 ## Use on desktop and mobile
 
-Open the production URL and continue with the allowlisted Google account. On desktop, use Left/Right to focus, Space to choose, `S` to skip, and `F` for full screen; clicking a photograph chooses it immediately.
+Open the production URL and continue with the allowlisted Google account. Ranking always uses the full viewport; on desktop, use Left/Right to focus, Space to choose, or `S` to skip, and click a photograph to choose it immediately. Use **Collection** to open the ranked list.
 
 On iPhone or iPad, open the site in Safari and choose **Share → Add to Home Screen**. On Android, use the browser's **Install app** action when offered. Tap either photograph to choose it, swipe left or right toward the preferred side, and swipe up to skip. The collection tab shows the live Elo order; tapping a card opens its original and attribution.
 
@@ -196,9 +196,11 @@ The Mac does not need to be online after deployment. A network connection is req
 - **Live ranking:** adaptive Elo makes every choice visible immediately. Every comparison is retained so rankings can be reconstructed or batch-refit later.
 - **Pair selection:** under-compared photographs and close Elo neighbors are prioritized while immediate repeats are avoided. Model uncertainty influences pairing only after a model exists.
 - **Taste model:** normalized OpenCLIP ViT-B/32 embeddings are cached once. A regularized zero-bias linear head learns `P(A > B) = sigmoid(score(A) - score(B))` from embedding differences.
-- **Training cadence:** the first smoke-test head becomes eligible at 20 comparisons, retraining runs every 20 comparisons through 100, and mature models retrain every 50 comparisons afterward. Jobs are cutoff-pinned and idempotent; discovery remains curated until a promoted model has at least 100 comparisons.
+- **Training cadence:** the first smoke-test head becomes eligible at 20 comparisons, retraining runs every 20 comparisons through 100, and mature models retrain every 50 comparisons afterward. Jobs are cutoff-pinned and idempotent.
 - **Discovery:** candidates pass rights, full-decode, resolution, megapixel, byte, corruption, and duplicate gates before scoring. The model reorders only licensed, technically valid candidates; it never fabricates preference labels.
-- **Exploration:** model-guided discovery reserves 20% of each small batch for deterministic exploration so an early model cannot narrow the collection to only what it already understands.
+- **Crawler bandit:** after a promoted model reaches 40 comparisons and at least four top anchors have three matches each, discounted EXP3-IX learns which source category produces the strongest image relative to those anchors. Before that gate, the persisted curated frontier remains in control.
+- **Reward correction:** an eight-head pair-group-bootstrap ensemble supplies a conservative 10th-percentile proxy reward; once a discovered image has three to eight human matches, its Elo-relative outcome progressively replaces that proxy.
+- **Exploration and audit:** source selection mixes in 20% randomized, exactly propensity-logged exploration, while each model-guided import batch independently reserves 20% for deterministic candidate exploration. Censored and failed fetches never become rewards.
 
 The personal head is trained only from the owner's choices. Awards, source curation, resolution, and generic aesthetics may filter intake, but they do not become fake personal labels.
 
@@ -233,6 +235,7 @@ Hard controls in the scheduler and worker include:
 - content-addressed deduplication before storage;
 - previews and thumbnails for ordinary UI traffic, reserving originals for the lightbox;
 - preview-only, snapshot-fingerprinted embeddings and grouped-holdout promotion gates before a candidate model can rewrite utilities or steer discovery;
+- exact source-action propensities, policy/model/anchor context, outcomes, and delayed human corrections for future off-policy evaluation;
 - Neon compute that can scale to zero while idle.
 
 Environment variables documented in `hosted_worker/config.py` may lower worker limits but cannot raise their compiled hard ceilings. Before enabling Cron, configure [Vercel Spend Management](https://vercel.com/docs/spend-management) with notifications and a hard budget appropriate to the account, review [Sandbox usage](https://vercel.com/docs/sandbox), watch [Blob storage and transfer](https://vercel.com/docs/vercel-blob/usage-and-pricing), and keep the Neon project on a bounded plan. Cloud deployment is designed to be inexpensive at single-user volume, but storage, transfer, database, function, and Sandbox usage are still billable services.

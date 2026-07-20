@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import math
+import random
 import tempfile
 import time
 import urllib.error
@@ -17,12 +18,7 @@ import numpy as np
 from PIL import Image, UnidentifiedImageError
 
 from image_ranker.ingest import InvalidImage, validate_image
-from image_ranker.ml import (
-    PreferenceHead,
-    _OpenClipRuntime,
-    deserialize_embedding,
-    serialize_embedding,
-)
+from image_ranker.ml import PreferenceHead, _OpenClipRuntime, deserialize_embedding, serialize_embedding
 from image_ranker.sources.wikimedia import (
     DEFAULT_CATEGORIES,
     EXT_METADATA_FIELDS,
@@ -36,12 +32,29 @@ from image_ranker.sources.wikimedia import (
 )
 
 from .blob_store import ImagePayload, prepare_image, upload_image
+from .bandit import (
+    POLICY_DISCOUNT,
+    POLICY_VERSION,
+    MIN_REWARD_MODEL_COMPARISONS,
+    SOURCE_EXPLORATION_FRACTION,
+    BanditDecision,
+    RewardContext,
+    action_outcome,
+    anchor_relative_reward,
+    choose_arm,
+    exp3_ix_probabilities,
+    finish_action,
+    link_discovery,
+    load_action_history,
+    load_reward_context,
+    refresh_human_feedback,
+    start_action,
+)
 from .config import WorkerLimits
 from .database import imported_today
 from .encoder import hosted_encoder_id
 
 
-TASTE_GUIDED_MINIMUM = 100
 EXPLORATION_FRACTION = 0.20
 FRONTIER_VERSION = 1
 FRONTIER_PAGE_SIZE = 5
@@ -73,34 +86,16 @@ class Candidate:
     embedding: np.ndarray | None = None
     score: float = 0.0
     selection_mode: str = "curated"
+    action_id: int | None = None
+    proxy_reward: float | None = None
 
 
-def _latest_head(connection: Any, user_id: str) -> PreferenceHead | None:
-    encoder = hosted_encoder_id()
-    with connection.cursor() as cursor:
-        cursor.execute(
-            """SELECT weights_json
-                FROM model_runs
-                WHERE user_id=%s
-                  AND comparison_count >= %s
-                  AND promoted
-                  AND encoder=%s
-                ORDER BY comparison_count DESC, id DESC
-                LIMIT 1""",
-            (user_id, TASTE_GUIDED_MINIMUM, encoder),
-        )
-        row = cursor.fetchone()
-    if row is None:
-        return None
-    value = row["weights_json"] or {}
-    if not isinstance(value, Mapping):
-        raise RuntimeError("latest hosted preference weights are malformed")
-    encoder = value.get("encoder")
-    weights = np.asarray(value.get("weights"), dtype=np.float32)
-    dimensions = value.get("dimensions")
-    if encoder != hosted_encoder_id() or dimensions != weights.size:
-        raise RuntimeError("latest hosted preference weights use an incompatible encoder")
-    return PreferenceHead(weights, encoder=str(encoder))
+@dataclass(frozen=True)
+class FrontierPage:
+    pages: list[dict[str, Any]]
+    exhausted: bool
+    decision: BanditDecision | None = None
+    action_id: int | None = None
 
 
 def _initial_frontier() -> dict[str, Any]:
@@ -201,6 +196,9 @@ PageLoader = Callable[
     [str, Mapping[str, str], int, float],
     tuple[list[dict[str, Any]], Optional[dict[str, str]]],
 ]
+ArmSelector = Callable[[tuple[str, ...]], BanditDecision]
+ActionStarter = Callable[[int, BanditDecision], int]
+ActionFailure = Callable[[int], None]
 
 
 def _frontier_pages(
@@ -209,30 +207,60 @@ def _frontier_pages(
     *,
     request_delay: float = 1.0,
     page_loader: PageLoader = _category_page,
-) -> Iterator[tuple[list[dict[str, Any]], bool]]:
+    arm_selector: ArmSelector | None = None,
+    action_starter: ActionStarter | None = None,
+    action_failure: ActionFailure | None = None,
+) -> Iterator[FrontierPage]:
     """Yield small pages while mutating a validated opaque continuation frontier."""
+    if (arm_selector is None) != (action_starter is None):
+        raise ValueError("bandit selector and action logger must be configured together")
     remaining = maximum
-    empty_categories = 0
-    while remaining > 0 and empty_categories < len(DEFAULT_CATEGORIES):
-        index = int(frontier["next_category"])
-        category = DEFAULT_CATEGORIES[index]
-        continuation = frontier["continuations"][category]
-        pages, next_token = page_loader(
-            category,
-            continuation,
-            min(FRONTIER_PAGE_SIZE, remaining),
-            request_delay,
+    exhausted_categories: set[str] = set()
+    action_index = 0
+    while remaining > 0 and len(exhausted_categories) < len(DEFAULT_CATEGORIES):
+        available = tuple(
+            category
+            for category in DEFAULT_CATEGORIES
+            if category not in exhausted_categories
         )
+        decision = arm_selector(available) if arm_selector is not None else None
+        if decision is not None:
+            if decision.arm not in available:
+                raise RuntimeError("bandit selected an unavailable crawler category")
+            category = decision.arm
+            index = DEFAULT_CATEGORIES.index(category)
+        else:
+            index = int(frontier["next_category"])
+            while DEFAULT_CATEGORIES[index] in exhausted_categories:
+                index = (index + 1) % len(DEFAULT_CATEGORIES)
+            category = DEFAULT_CATEGORIES[index]
+        action_id = (
+            action_starter(action_index, decision)
+            if action_starter is not None and decision is not None
+            else None
+        )
+        action_index += 1
+        continuation = frontier["continuations"][category]
+        try:
+            pages, next_token = page_loader(
+                category,
+                continuation,
+                min(FRONTIER_PAGE_SIZE, remaining),
+                request_delay,
+            )
+        except BaseException:
+            if action_id is not None and action_failure is not None:
+                action_failure(action_id)
+            raise
         exhausted = next_token is None
         # Reset only after the provider explicitly omits continuation.
         frontier["continuations"][category] = next_token or {}
         frontier["next_category"] = (index + 1) % len(DEFAULT_CATEGORIES)
-        if not pages:
-            empty_categories += 1
-            continue
-        empty_categories = 0
-        remaining -= len(pages)
-        yield pages, exhausted
+        if exhausted:
+            exhausted_categories.add(category)
+        if pages:
+            remaining -= len(pages)
+        yield FrontierPage(pages, exhausted, decision, action_id)
 
 
 def _existing_user_provenance(connection: Any, user_id: str) -> tuple[set[str], set[str]]:
@@ -425,7 +453,7 @@ def _insert_candidate(
     user_id: str,
     candidate: Candidate,
     head: PreferenceHead | None,
-) -> bool:
+) -> int | None:
     from psycopg.types.json import Jsonb
 
     with connection.cursor() as cursor:
@@ -493,7 +521,7 @@ def _insert_candidate(
             (user_id, image_id, utility),
         )
         linked = cursor.fetchone() is not None
-    return linked
+    return image_id if linked else None
 
 
 def _select_candidates(
@@ -534,6 +562,8 @@ def crawl_job(
     user_id: str,
     input_data: Mapping[str, Any],
     limits: WorkerLimits,
+    *,
+    job_id: int | None = None,
 ) -> dict[str, Any]:
     try:
         requested = int(input_data.get("requested_imports", limits.max_crawl_imports_per_run))
@@ -546,7 +576,25 @@ def crawl_job(
     if allowance == 0:
         return {"imported": 0, "daily_cap_reached": True, "already_imported_today": today}
 
-    head = _latest_head(connection, user_id)
+    reward_context = load_reward_context(connection, user_id)
+    head = reward_context.head if reward_context is not None else None
+    history = []
+    feedback_refreshed = 0
+    policy_seed: int | None = None
+    policy_rng: random.Random | None = None
+    if reward_context is not None:
+        if job_id is None or job_id < 1:
+            raise RuntimeError("model-guided crawling requires a durable worker job id")
+        feedback_refreshed = refresh_human_feedback(connection, user_id)
+        history = load_action_history(connection, user_id)
+        run_day = str(input_data.get("run_day") or "")
+        seed_material = (
+            f"{user_id}:{job_id}:{run_day}:{reward_context.model_run_id}"
+        ).encode("utf-8")
+        policy_seed = int.from_bytes(
+            hashlib.sha256(seed_material).digest()[:8], "big", signed=False
+        )
+        policy_rng = random.Random(policy_seed)
     pool_size = min(
         limits.max_crawl_candidates,
         allowance * 3 if head is not None else allowance,
@@ -569,17 +617,79 @@ def crawl_job(
     aggregate_reached = False
     seen_source_urls = set(existing_source_urls)
     seen_page_urls = set(existing_page_urls)
+    actions: dict[int, dict[str, Any]] = {}
+
+    def select_arm(available: tuple[str, ...]) -> BanditDecision:
+        if policy_rng is None:
+            raise RuntimeError("crawler bandit random generator is unavailable")
+        probabilities = exp3_ix_probabilities(
+            DEFAULT_CATEGORIES,
+            history,
+            available=available,
+        )
+        return choose_arm(probabilities, policy_rng)
+
+    def begin_action(action_index: int, decision: BanditDecision) -> int:
+        assert reward_context is not None and job_id is not None
+        action_id = start_action(
+            connection,
+            user_id=user_id,
+            worker_job_id=job_id,
+            action_index=action_index,
+            decision=decision,
+            context=reward_context,
+            context_json={
+                "probabilities": dict(decision.probabilities),
+                "history_actions": len(history),
+                "model_comparison_count": reward_context.comparison_count,
+                "policy_discount": POLICY_DISCOUNT,
+                "source_exploration_fraction": SOURCE_EXPLORATION_FRACTION,
+            },
+        )
+        actions[action_id] = {"seen": 0, "censored": False}
+        return action_id
+
+    def fail_action(action_id: int) -> None:
+        finish_action(
+            connection,
+            user_id=user_id,
+            action_id=action_id,
+            status="failed",
+            candidates_seen=0,
+            candidates_eligible=0,
+            proxy_reward=None,
+        )
+        connection.commit()
+
     with tempfile.TemporaryDirectory(prefix="lumen-hosted-crawl-") as directory:
         root = Path(directory)
-        for page, exhausted in _frontier_pages(frontier, limits.max_crawl_scans):
-            source_exhaustions += int(exhausted)
-            for metadata in page:
+        frontier_pages = _frontier_pages(
+            frontier,
+            limits.max_crawl_scans,
+            arm_selector=select_arm if reward_context is not None else None,
+            action_starter=begin_action if reward_context is not None else None,
+            action_failure=fail_action if reward_context is not None else None,
+        )
+        for frontier_page in frontier_pages:
+            source_exhaustions += int(frontier_page.exhausted)
+            action = (
+                actions[frontier_page.action_id]
+                if frontier_page.action_id is not None
+                else None
+            )
+            if action is not None:
+                action["seen"] += len(frontier_page.pages)
+            for metadata in frontier_page.pages:
                 scanned += 1
                 if aggregate_reached:
                     rejection_reasons["aggregate download cap reached"] += 1
+                    if action is not None:
+                        action["censored"] = True
                     continue
                 if len(eligible) >= collection_target:
                     rejection_reasons["candidate pool filled"] += 1
+                    if action is not None:
+                        action["censored"] = True
                     continue
 
                 source_url = str(metadata.get("source_url") or "")
@@ -624,6 +734,8 @@ def crawl_job(
                 if declared_bytes > remaining_bytes:
                     rejection_reasons["aggregate download cap reached"] += 1
                     aggregate_reached = True
+                    if action is not None:
+                        action["censored"] = True
                     continue
 
                 suffix = MIME_SUFFIXES[str(metadata["mime"])]
@@ -640,6 +752,8 @@ def crawl_job(
                     if download_limit < limits.max_download_bytes:
                         rejection_reasons["aggregate download cap reached"] += 1
                         aggregate_reached = True
+                        if action is not None:
+                            action["censored"] = True
                     else:
                         rejection_reasons[str(exc)] += 1
                     continue
@@ -677,17 +791,27 @@ def crawl_job(
                     rejection_reasons[str(exc)] += 1
                     path.unlink(missing_ok=True)
                     continue
-                eligible.append(Candidate(dict(metadata), preview_path, payload))
+                eligible.append(
+                    Candidate(
+                        dict(metadata),
+                        preview_path,
+                        payload,
+                        action_id=frontier_page.action_id,
+                    )
+                )
             if aggregate_reached or len(eligible) >= collection_target:
                 break
 
         _encode_candidates(eligible, limits)
-        if head is not None:
+        if reward_context is not None:
             for candidate in eligible:
                 assert candidate.embedding is not None
-                candidate.score = head.score(candidate.embedding)
+                candidate.score = reward_context.head.score(candidate.embedding)
                 if not math.isfinite(candidate.score):
                     raise RuntimeError("preference model returned a non-finite crawl score")
+                candidate.proxy_reward = anchor_relative_reward(
+                    reward_context, candidate.embedding
+                )
             eligible.sort(key=lambda candidate: candidate.score, reverse=True)
 
         eligible, near_duplicate_count = _filter_near_duplicates(
@@ -696,11 +820,46 @@ def crawl_job(
         if near_duplicate_count:
             rejection_reasons["visually near-duplicate"] += near_duplicate_count
 
+        candidates_by_action: dict[int, list[Candidate]] = {}
+        for candidate in eligible:
+            if candidate.action_id is not None:
+                candidates_by_action.setdefault(candidate.action_id, []).append(candidate)
+
         selected = _select_candidates(eligible, allowance, user_id, head)
         imported = 0
         for candidate in selected:
-            if _insert_candidate(connection, user_id, candidate, head):
-                imported += 1
+            image_id = _insert_candidate(connection, user_id, candidate, head)
+            if image_id is None:
+                continue
+            imported += 1
+            if candidate.action_id is not None and candidate.proxy_reward is not None:
+                link_discovery(
+                    connection,
+                    user_id=user_id,
+                    action_id=candidate.action_id,
+                    image_id=image_id,
+                    proxy_reward=candidate.proxy_reward,
+                )
+
+        for action_id, action in actions.items():
+            action_candidates = candidates_by_action.get(action_id, [])
+            status, proxy_reward = action_outcome(
+                [
+                    float(candidate.proxy_reward)
+                    for candidate in action_candidates
+                    if candidate.proxy_reward is not None
+                ],
+                resource_censored=bool(action["censored"]),
+            )
+            finish_action(
+                connection,
+                user_id=user_id,
+                action_id=action_id,
+                status=status,
+                candidates_seen=int(action["seen"]),
+                candidates_eligible=len(action_candidates),
+                proxy_reward=proxy_reward,
+            )
         connection.commit()
 
     return {
@@ -709,7 +868,7 @@ def crawl_job(
         "allowance": allowance,
         "already_imported_today": today,
         "mode": "model-guided" if head is not None else "curated-seed",
-        "taste_guided_minimum": TASTE_GUIDED_MINIMUM,
+        "taste_guided_minimum": MIN_REWARD_MODEL_COMPARISONS,
         "exploration_selected": sum(
             candidate.selection_mode == "exploration" for candidate in selected
         ),
@@ -724,6 +883,17 @@ def crawl_job(
         "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "source_frontier": frontier,
         "source_exhaustions": source_exhaustions,
+        "source_policy": {
+            "active": reward_context is not None,
+            "version": POLICY_VERSION if reward_context is not None else None,
+            "history_actions": len(history),
+            "actions_recorded": len(actions),
+            "feedback_refreshed": feedback_refreshed,
+            "model_run_id": (
+                reward_context.model_run_id if reward_context is not None else None
+            ),
+            "policy_seed": policy_seed,
+        },
     }
 
 

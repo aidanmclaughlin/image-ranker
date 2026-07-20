@@ -18,6 +18,8 @@ const TABLE_PRIVILEGES = [
 ] as const;
 const TABLE_POLICY: Record<string, ReadonlySet<string>> = {
   comparisons: new Set(["select"]),
+  crawl_bandit_actions: new Set(["select", "insert", "update"]),
+  crawl_bandit_discoveries: new Set(["select", "insert"]),
   embeddings: new Set(["select", "insert"]),
   images: new Set(["select", "insert"]),
   model_runs: new Set(["select", "insert"]),
@@ -25,6 +27,7 @@ const TABLE_POLICY: Record<string, ReadonlySet<string>> = {
   worker_jobs: new Set(["select", "update"]),
 };
 const SEQUENCE_POLICY: Record<string, ReadonlySet<string>> = {
+  crawl_bandit_actions_id_seq: new Set(["usage"]),
   images_id_seq: new Set(["usage"]),
   model_runs_id_seq: new Set(["usage"]),
 };
@@ -253,10 +256,17 @@ async function main(): Promise<void> {
     await client.query(
       `GRANT SELECT, INSERT, UPDATE ON user_images TO ${role}`,
     );
+    await client.query(
+      `GRANT SELECT, INSERT, UPDATE ON crawl_bandit_actions TO ${role}`,
+    );
+    await client.query(
+      `GRANT SELECT, INSERT ON crawl_bandit_discoveries TO ${role}`,
+    );
     await client.query(`GRANT SELECT ON comparisons TO ${role}`);
     await client.query(`GRANT SELECT, UPDATE ON worker_jobs TO ${role}`);
     await client.query(
-      `GRANT USAGE ON SEQUENCE images_id_seq, model_runs_id_seq TO ${role}`,
+      `GRANT USAGE ON SEQUENCE ` +
+        `images_id_seq, model_runs_id_seq, crawl_bandit_actions_id_seq TO ${role}`,
     );
     await client.query("COMMIT");
   } catch (error) {

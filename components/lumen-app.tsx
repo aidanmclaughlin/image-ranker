@@ -189,17 +189,6 @@ function Candidate({
         />
         <span className="choice-wash" aria-hidden="true" />
       </span>
-      <span className="candidate-number" aria-hidden="true">
-        {side === "left" ? "01" : "02"}
-      </span>
-      <span className="key-chip" aria-hidden="true">
-        <span>{side === "left" ? "←" : "→"}</span>
-      </span>
-      <span className="candidate-caption">
-        <strong className="candidate-title">{title}</strong>
-        <span className="candidate-credit">{creator}</span>
-      </span>
-      <span className="focus-label">Selected — press Space to choose</span>
     </button>
   );
 }
@@ -666,22 +655,27 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
 
       <main id="main" className={view === "rank" ? "rank-main" : "collection-main"}>
         {view === "rank" ? (
-          <section className="view rank-view hosted-rank-view" aria-labelledby="rank-title">
+          <section
+            className="view rank-view hosted-rank-view"
+            aria-labelledby="rank-title"
+            aria-describedby="rank-help"
+          >
             <h1 className="visually-hidden" id="rank-title">Choose the photograph you prefer</h1>
+            <p className="visually-hidden" id="rank-help">
+              Choose a photograph by tapping it, or focus one with the arrow keys and press Space. Press S or swipe up to skip.
+            </p>
+            <p className="visually-hidden" aria-live="polite">
+              {sessionChoices.toLocaleString()} {sessionChoices === 1 ? "choice" : "choices"} this session; {stats.comparisons.toLocaleString()} total.
+            </p>
             <div className="rank-overlay" aria-label="Ranking controls">
               <div className="rank-identity" aria-label="Lumen taste session">
                 <span className="brand-mark" aria-hidden="true" />
-                <span>Lumen</span>
+                <span className="visually-hidden">Lumen</span>
               </div>
               <div className="rank-controls">
-                <p className="rank-session-status" aria-live="polite">
-                  <strong>{sessionChoices.toLocaleString()}</strong> this session
-                  <span aria-hidden="true">·</span>
-                  {stats.comparisons.toLocaleString()} total
-                </p>
                 <button className="rank-control-button" type="button" aria-label="Skip this pair" onClick={skip}>
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13m-4-4 4 4-4 4" /></svg>
-                  <span>Skip</span>
+                  <span className="visually-hidden">Skip</span>
                 </button>
                 <button
                   className="rank-control-button rank-list-button"
@@ -691,7 +685,7 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
                   <svg viewBox="0 0 24 24" aria-hidden="true">
                     <path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z" />
                   </svg>
-                  <span>Ranked list</span>
+                  <span className="visually-hidden">Ranked list</span>
                 </button>
                 {accountMenu}
               </div>
@@ -722,7 +716,7 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
                     onFocus={() => setFocused("left")}
                     onChoose={() => void choose("left")}
                   />
-                  <div className="versus" aria-hidden="true"><span>or</span></div>
+                  <div className="versus" aria-hidden="true" />
                   <Candidate
                     key={`right-${pair.right.id}`}
                     image={pair.right}
@@ -739,7 +733,7 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
               {pairState === "loading" ? (
                 <div className="arena arena-loading" aria-label="Loading photographs" aria-busy="true">
                   <div className="candidate"><span className="loading-shimmer" /></div>
-                  <div className="versus" aria-hidden="true"><span>or</span></div>
+                  <div className="versus" aria-hidden="true" />
                   <div className="candidate"><span className="loading-shimmer" /></div>
                 </div>
               ) : null}
@@ -770,15 +764,6 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
               ) : null}
             </div>
 
-            <div className="instruction-bar" aria-label="Keyboard instructions">
-              <p><span><kbd>←</kbd><kbd>→</kbd></span> Focus an image</p>
-              <span className="instruction-rule" aria-hidden="true" />
-              <p><kbd className="space-key">Space</kbd> Confirm your choice</p>
-              <span className="instruction-rule" aria-hidden="true" />
-              <p><kbd>S</kbd> Skip</p>
-              <p className="click-hint">You can also click an image to choose it.</p>
-              <p className="touch-hint">Tap a photograph · swipe toward a side · swipe up to skip</p>
-            </div>
           </section>
         ) : (
           <section className="view collection-view" aria-labelledby="collection-title">

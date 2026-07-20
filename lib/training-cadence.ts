@@ -26,3 +26,19 @@ export function trainingIsDue(
 ): boolean {
   return comparisonCount >= nextTrainingTarget(lastTrainedCount);
 }
+
+export function latestTrainingTarget(
+  comparisonCount: number,
+  lastTrainedCount: number | null,
+): number {
+  if (!Number.isSafeInteger(comparisonCount) || comparisonCount < 0) {
+    throw new RangeError("comparisonCount must be a non-negative integer");
+  }
+  let target = nextTrainingTarget(lastTrainedCount);
+  if (comparisonCount < target) return target;
+  while (true) {
+    const next = nextTrainingTarget(target);
+    if (next > comparisonCount) return target;
+    target = next;
+  }
+}

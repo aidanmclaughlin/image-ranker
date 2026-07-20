@@ -126,6 +126,49 @@ CREATE TABLE IF NOT EXISTS worker_jobs (
   finished_at TIMESTAMPTZ
 );
 
+CREATE TABLE IF NOT EXISTS crawl_bandit_actions (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  worker_job_id BIGINT NOT NULL REFERENCES worker_jobs(id) ON DELETE CASCADE,
+  action_index INTEGER NOT NULL CHECK (action_index >= 0),
+  arm TEXT NOT NULL,
+  policy_version TEXT NOT NULL,
+  propensity DOUBLE PRECISION NOT NULL
+    CHECK (propensity > 0 AND propensity <= 1),
+  model_run_id INTEGER REFERENCES model_runs(id) ON DELETE SET NULL,
+  anchor_image_ids INTEGER[] NOT NULL DEFAULT '{}',
+  context_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status TEXT NOT NULL
+    CHECK (status IN ('chosen', 'observed', 'censored', 'failed')),
+  proxy_reward DOUBLE PRECISION
+    CHECK (proxy_reward BETWEEN 0 AND 1),
+  human_reward DOUBLE PRECISION
+    CHECK (human_reward BETWEEN 0 AND 1),
+  human_matches INTEGER NOT NULL DEFAULT 0 CHECK (human_matches >= 0),
+  effective_reward DOUBLE PRECISION
+    CHECK (effective_reward BETWEEN 0 AND 1),
+  candidates_seen INTEGER NOT NULL DEFAULT 0 CHECK (candidates_seen >= 0),
+  candidates_eligible INTEGER NOT NULL DEFAULT 0 CHECK (candidates_eligible >= 0),
+  chosen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ,
+  UNIQUE (worker_job_id, action_index),
+  UNIQUE (user_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS crawl_bandit_discoveries (
+  user_id TEXT NOT NULL,
+  action_id BIGINT NOT NULL,
+  image_id INTEGER NOT NULL,
+  candidate_proxy_reward DOUBLE PRECISION NOT NULL
+    CHECK (candidate_proxy_reward BETWEEN 0 AND 1),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, image_id),
+  FOREIGN KEY (user_id, action_id)
+    REFERENCES crawl_bandit_actions(user_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id, image_id)
+    REFERENCES user_images(user_id, image_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_user_images_rank
   ON user_images(user_id, active, elo DESC, matches DESC);
 CREATE INDEX IF NOT EXISTS idx_user_images_utility
@@ -156,6 +199,11 @@ CREATE INDEX IF NOT EXISTS idx_worker_jobs_user_created
   ON worker_jobs(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_worker_jobs_status
   ON worker_jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_crawl_bandit_history
+  ON crawl_bandit_actions(user_id, id DESC)
+  WHERE status = 'observed' AND effective_reward IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_crawl_bandit_discoveries_action
+  ON crawl_bandit_discoveries(user_id, action_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_jobs_single_active
   ON worker_jobs ((TRUE))
   WHERE status IN ('queued', 'running');

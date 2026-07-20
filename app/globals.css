@@ -439,9 +439,6 @@
   background: #070706;
 }
 
-.hosted-rank-view .candidate-number { top: 76px; }
-.hosted-rank-view .key-chip { top: 74px; }
-
 .hosted-rank-view .versus {
   z-index: 4;
   width: 1px;
@@ -449,21 +446,6 @@
 }
 
 .hosted-rank-view .versus::before { display: none; }
-
-.hosted-rank-view .versus span {
-  top: 50%;
-  left: 50%;
-  min-width: 38px;
-  padding: 9px 10px 10px;
-  border: 1px solid rgba(247, 245, 239, .24);
-  border-radius: 999px;
-  background: rgba(13, 13, 11, .82);
-  box-shadow: 0 12px 34px rgba(0, 0, 0, .3);
-  color: rgba(247, 245, 239, .78);
-  text-align: center;
-  backdrop-filter: blur(14px);
-  transform: translate(-50%, -50%);
-}
 
 .rank-overlay {
   position: absolute;
@@ -491,8 +473,8 @@
 }
 
 .rank-identity {
-  padding: 0 16px;
-  gap: 10px;
+  width: 46px;
+  justify-content: center;
   font-size: 10px;
   font-weight: 650;
   letter-spacing: .2em;
@@ -505,20 +487,6 @@
   padding: 5px;
   gap: 4px;
 }
-
-.rank-session-status {
-  margin: 0;
-  padding: 0 12px 0 9px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: rgba(247, 245, 239, .62);
-  font-size: 9px;
-  letter-spacing: .06em;
-  white-space: nowrap;
-}
-
-.rank-session-status strong { color: var(--white); font-weight: 650; }
 
 .rank-control-button {
   appearance: none;
@@ -557,34 +525,36 @@
 .hosted-rank-view .account-menu summary { width: 36px; height: 36px; background: rgba(247, 245, 239, .06); }
 .hosted-rank-view .account-popover { top: 44px; }
 
-.hosted-rank-view .instruction-bar {
+.hosted-rank-view .account-avatar {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  display: block;
+  font-size: 0;
+}
+
+.hosted-rank-view .account-avatar::before,
+.hosted-rank-view .account-avatar::after {
+  content: "";
   position: absolute;
-  z-index: 12;
   left: 50%;
-  bottom: max(12px, env(safe-area-inset-bottom));
-  min-height: 0;
-  width: max-content;
-  max-width: calc(100vw - 28px);
-  padding: 8px 11px;
-  border: 1px solid rgba(247, 245, 239, .15);
-  border-radius: 2px;
-  background: rgba(12, 12, 10, .7);
-  box-shadow: 0 12px 34px rgba(0, 0, 0, .25);
-  backdrop-filter: blur(16px);
+  border: 1px solid currentColor;
   transform: translateX(-50%);
-  pointer-events: none;
 }
 
-.hosted-rank-view .instruction-bar kbd {
-  height: 20px;
-  min-width: 20px;
-  border-color: rgba(247, 245, 239, .28);
-  background: rgba(247, 245, 239, .07);
-  box-shadow: none;
+.hosted-rank-view .account-avatar::before {
+  top: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
 }
 
-.hosted-rank-view .instruction-bar .space-key { min-width: 47px; }
-.hosted-rank-view .instruction-bar .click-hint { display: none; }
+.hosted-rank-view .account-avatar::after {
+  bottom: 0;
+  width: 12px;
+  height: 6px;
+  border-radius: 8px 8px 2px 2px;
+}
 
 .hosted-rank-view .empty-state,
 .hosted-rank-view .error-state {
@@ -611,29 +581,11 @@
 
   .rank-identity,
   .rank-controls { min-height: 42px; }
-  .rank-identity { padding: 0 11px; }
-  .rank-session-status { display: none; }
+  .rank-identity { width: 42px; }
   .rank-controls { margin-left: auto; padding: 3px; }
   .rank-control-button { min-height: 34px; padding-inline: 9px; }
   .rank-list-button { padding-inline: 11px; }
   .hosted-rank-view .account-menu summary { width: 34px; height: 34px; }
-
-  .hosted-rank-view .instruction-bar {
-    bottom: max(8px, env(safe-area-inset-bottom));
-    padding: 7px 10px;
-  }
-
-  .hosted-rank-view .instruction-bar p { display: none; }
-  .hosted-rank-view .instruction-bar .touch-hint {
-    display: flex;
-    color: rgba(247, 245, 239, .78);
-    font-size: 8px;
-    letter-spacing: .08em;
-  }
-
-  .hosted-rank-view #right .candidate-caption {
-    padding-bottom: max(42px, calc(34px + env(safe-area-inset-bottom)));
-  }
 
   .hosted-rank-view .account-popover {
     position: fixed;
@@ -643,11 +595,5 @@
 }
 
 @media (max-width: 430px) {
-  .rank-identity > span:last-child { display: none; }
-  .rank-identity { padding-inline: 13px; }
   .rank-control-button { gap: 6px; }
-  .rank-control-button > span { display: none; }
-  .rank-list-button > span { display: inline; }
-  .hosted-rank-view .candidate-number { top: 57px; }
-  .hosted-rank-view .key-chip { top: 56px; }
 }

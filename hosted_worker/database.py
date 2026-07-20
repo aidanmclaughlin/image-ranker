@@ -116,6 +116,12 @@ def mark_failed(connection: Any, job_id: int, error: str) -> None:
                WHERE id=%s AND status IN ('queued','running')""",
             (message, job_id),
         )
+        cursor.execute(
+            """UPDATE crawl_bandit_actions
+               SET status='failed', completed_at=now()
+               WHERE worker_job_id=%s AND status='chosen'""",
+            (job_id,),
+        )
     connection.commit()
 
 

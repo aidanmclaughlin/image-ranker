@@ -21,6 +21,7 @@ from .training import train_job
 def dispatch(
     connection: Any,
     *,
+    job_id: int | None = None,
     kind: str,
     user_id: str,
     input_data: Mapping[str, Any],
@@ -29,7 +30,13 @@ def dispatch(
     if kind == "train":
         return train_job(connection, user_id, input_data, limits)
     if kind == "crawl":
-        return crawl_job(connection, user_id, input_data, limits)
+        return crawl_job(
+            connection,
+            user_id,
+            input_data,
+            limits,
+            job_id=job_id,
+        )
     raise RuntimeError(f"unsupported worker job kind: {kind}")
 
 
@@ -43,6 +50,7 @@ def run(job_id: int) -> dict[str, Any]:
             try:
                 output = dispatch(
                     connection,
+                    job_id=job.id,
                     kind=job.kind,
                     user_id=job.user_id,
                     input_data=job.input,
