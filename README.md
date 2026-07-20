@@ -196,7 +196,7 @@ The Mac does not need to be online after deployment. A network connection is req
 - **Live ranking:** adaptive Elo makes every choice visible immediately. Every comparison is retained so rankings can be reconstructed or batch-refit later.
 - **Pair selection:** under-compared photographs and close Elo neighbors are prioritized while immediate repeats are avoided. Model uncertainty influences pairing only after a model exists.
 - **Taste model:** normalized OpenCLIP ViT-B/32 embeddings are cached once. A regularized zero-bias linear head learns `P(A > B) = sigmoid(score(A) - score(B))` from embedding differences.
-- **Training cadence:** the first smoke-test head becomes eligible at 20 comparisons, then retraining requires 50 additional comparisons. Jobs are cutoff-pinned and idempotent; discovery remains curated until a model has at least 100 comparisons.
+- **Training cadence:** the first smoke-test head becomes eligible at 20 comparisons, retraining runs every 20 comparisons through 100, and mature models retrain every 50 comparisons afterward. Jobs are cutoff-pinned and idempotent; discovery remains curated until a promoted model has at least 100 comparisons.
 - **Discovery:** candidates pass rights, full-decode, resolution, megapixel, byte, corruption, and duplicate gates before scoring. The model reorders only licensed, technically valid candidates; it never fabricates preference labels.
 - **Exploration:** model-guided discovery reserves 20% of each small batch for deterministic exploration so an early model cannot narrow the collection to only what it already understands.
 
@@ -225,7 +225,7 @@ Hard controls in the scheduler and worker include:
 - one active worker globally, reinforced by a database advisory lock;
 - an 11-minute training timeout and eight-minute crawl timeout, supervised by a function capped at 780 seconds;
 - idempotent comparison cutoffs and unique model runs;
-- at most one training attempt per UTC day and three failed attempts in any rolling seven-day window, with automatic retry after the window;
+- at most one training attempt per comparison cutoff and UTC day, plus three failed attempts per cutoff in any rolling seven-day window, with automatic retry after the window;
 - at most 10,000 comparisons and 2,000 training images in one training run;
 - at most five imports per run and per UTC day, drawn from no more than 20 eligible candidates and 100 provider records;
 - a 20-image labeling-backlog gate and persisted per-category Wikimedia continuation frontier so discovery neither outruns the owner nor rescans the same prefix forever;

@@ -94,5 +94,9 @@ test("schema enforces replay-safe comparisons and worker concurrency", async () 
   assert.match(schema, /prior_comparison\.id IS NOT NULL/);
   assert.match(schema, /idx_worker_jobs_single_active/);
   assert.match(schema, /idx_worker_jobs_crawl_day/);
-  assert.match(schema, /idx_worker_jobs_train_day/);
+  assert.match(schema, /idx_worker_jobs_train_cutoff_day/);
+  assert.match(
+    schema,
+    /input_json->>'comparison_cutoff'[\s\S]+input_json->>'run_day'/,
+  );
 });

@@ -6,7 +6,13 @@ import { Sandbox } from "@vercel/sandbox";
 import { query } from "@/lib/db";
 import { safeErrorMessage } from "@/lib/redaction";
 import { workerSandboxAccess } from "@/lib/sandbox-policy";
+import {
+  nextTrainingTarget,
+  trainingIsDue,
+} from "@/lib/training-cadence";
 import { WORKER_PYTHON_COMMAND } from "@/lib/worker-runtime";
+
+export { trainingIsDue } from "@/lib/training-cadence";
 
 export type JobKind = "train" | "crawl";
 export type JobStatus =
@@ -51,8 +57,6 @@ export type ScheduleResult =
       retryAt?: string;
     };
 
-const TRAIN_MINIMUM = 20;
-const TRAIN_INCREMENT = 50;
 const TRAIN_MAX_ATTEMPTS = 3;
 const CRAWL_DAILY_CAP = 5;
 const CRAWL_LABEL_BACKLOG_CAP = 20;
@@ -69,17 +73,6 @@ function requireEnvironment(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is not configured`);
   return value;
-}
-
-export function trainingIsDue(
-  comparisonCount: number,
-  lastTrainedCount: number | null,
-): boolean {
-  if (comparisonCount < TRAIN_MINIMUM) return false;
-  return (
-    lastTrainedCount === null ||
-    comparisonCount - lastTrainedCount >= TRAIN_INCREMENT
-  );
 }
 
 async function expireStaleJobs(): Promise<void> {
@@ -120,10 +113,11 @@ async function trainingState(userId: string): Promise<TrainingState> {
      WHERE comparison.user_id=${userId}`;
   const comparisonCount = Number(rows[0]?.comparison_count ?? 0);
   const lastTrainedCount = rows[0]?.last_trained_count;
-  const targetCount =
+  const targetCount = nextTrainingTarget(
     lastTrainedCount === null || lastTrainedCount === undefined
-      ? TRAIN_MINIMUM
-      : Number(lastTrainedCount) + TRAIN_INCREMENT;
+      ? null
+      : Number(lastTrainedCount),
+  );
   if (comparisonCount < targetCount) {
     return {
       comparison_count: comparisonCount,

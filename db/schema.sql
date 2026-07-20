@@ -162,8 +162,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_jobs_single_active
 CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_jobs_crawl_day
   ON worker_jobs(user_id, (input_json->>'run_day'))
   WHERE kind = 'crawl';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_jobs_train_day
-  ON worker_jobs(user_id, (input_json->>'run_day'))
+DROP INDEX IF EXISTS idx_worker_jobs_train_day;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_jobs_train_cutoff_day
+  ON worker_jobs(
+    user_id,
+    (input_json->>'comparison_cutoff'),
+    (input_json->>'run_day')
+  )
   WHERE kind = 'train';
 
 CREATE OR REPLACE FUNCTION lumen_adaptive_k(match_count INTEGER)
