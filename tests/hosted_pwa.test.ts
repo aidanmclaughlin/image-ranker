@@ -76,12 +76,16 @@ test("hosted ranking uses one photograph and an accessible five-dot scale", asyn
   assert.match(component, /className="visually-hidden">Skip</);
   assert.match(component, /className="visually-hidden">Ranked list</);
   const ratingImageRule = styles.match(/\.rating-photo img\s*\{([\s\S]*?)\}/)?.[1] ?? "";
-  assert.match(ratingImageRule, /width:\s*100%/);
+  assert.match(ratingImageRule, /position:\s*absolute/);
+  assert.match(ratingImageRule, /inset:\s*0/);
+  assert.match(ratingImageRule, /width:\s*auto/);
   assert.match(ratingImageRule, /max-width:\s*100%/);
-  assert.match(ratingImageRule, /height:\s*100%/);
+  assert.match(ratingImageRule, /height:\s*auto/);
   assert.match(ratingImageRule, /max-height:\s*100%/);
+  assert.match(ratingImageRule, /margin:\s*auto/);
   assert.match(ratingImageRule, /object-fit:\s*contain/);
   assert.doesNotMatch(ratingImageRule, /object-fit:\s*cover/);
+  assert.match(styles, /\.rating-photo \.image-shell\s*\{[\s\S]*?width:\s*100%[\s\S]*?height:\s*100%/);
   assert.match(styles, /\.hosted-rank-view \.rating-stage\s*\{[\s\S]*?overflow:\s*hidden/);
   assert.match(styles, /\.rating-photo\s*\{[\s\S]*?overflow:\s*hidden/);
 
