@@ -8,10 +8,14 @@ _MIB = 1024 * 1024
 _HARD_CAPS = {
     "max_comparisons": 10_000,
     "max_training_images": 2_000,
-    "max_crawl_imports_per_run": 5,
-    "max_crawl_imports_per_day": 5,
-    "max_crawl_candidates": 20,
-    "max_crawl_scans": 100,
+    "max_crawl_imports_per_run": 10,
+    "max_crawl_imports_per_day": 100,
+    "max_crawl_candidates": 1_000,
+    "max_crawl_scans": 2_000,
+    "max_crawl_action_groups": 100,
+    "max_thumbnail_bytes": 4 * _MIB,
+    "max_total_thumbnail_bytes": 512 * _MIB,
+    "thumbnail_download_concurrency": 16,
     "max_download_bytes": 100 * _MIB,
     "max_total_download_bytes": 300 * _MIB,
     "embedding_batch_size": 16,
@@ -41,10 +45,14 @@ class WorkerLimits:
 
     max_comparisons: int = 10_000
     max_training_images: int = 2_000
-    max_crawl_imports_per_run: int = 5
-    max_crawl_imports_per_day: int = 5
-    max_crawl_candidates: int = 20
-    max_crawl_scans: int = 100
+    max_crawl_imports_per_run: int = 10
+    max_crawl_imports_per_day: int = 100
+    max_crawl_candidates: int = 1_000
+    max_crawl_scans: int = 2_000
+    max_crawl_action_groups: int = 100
+    max_thumbnail_bytes: int = 2 * 1024 * 1024
+    max_total_thumbnail_bytes: int = 256 * 1024 * 1024
+    thumbnail_download_concurrency: int = 8
     max_download_bytes: int = 80 * 1024 * 1024
     max_total_download_bytes: int = 300 * 1024 * 1024
     embedding_batch_size: int = 8
@@ -66,16 +74,30 @@ class WorkerLimits:
                 "LUMEN_MAX_TRAINING_IMAGES_PER_RUN", 2_000, 2_000
             ),
             max_crawl_imports_per_run=_bounded_int(
-                "LUMEN_MAX_CRAWL_IMPORTS_PER_RUN", 5, 5
+                "LUMEN_MAX_CRAWL_IMPORTS_PER_RUN", 10, 10
             ),
             max_crawl_imports_per_day=_bounded_int(
-                "LUMEN_MAX_CRAWL_IMPORTS_PER_DAY", 5, 5
+                "LUMEN_MAX_CRAWL_IMPORTS_PER_DAY", 100, 100
             ),
             max_crawl_candidates=_bounded_int(
-                "LUMEN_MAX_CRAWL_CANDIDATES_PER_RUN", 20, 20
+                "LUMEN_MAX_CRAWL_CANDIDATES_PER_RUN", 1_000, 1_000
             ),
             max_crawl_scans=_bounded_int(
-                "LUMEN_MAX_CRAWL_SCANS_PER_RUN", 100, 100
+                "LUMEN_MAX_CRAWL_SCANS_PER_RUN", 2_000, 2_000
+            ),
+            max_crawl_action_groups=_bounded_int(
+                "LUMEN_MAX_CRAWL_ACTION_GROUPS_PER_RUN", 100, 100
+            ),
+            max_thumbnail_bytes=_bounded_int(
+                "LUMEN_MAX_THUMBNAIL_MIB", 2, 4
+            )
+            * _MIB,
+            max_total_thumbnail_bytes=_bounded_int(
+                "LUMEN_MAX_TOTAL_THUMBNAIL_MIB", 256, 512
+            )
+            * _MIB,
+            thumbnail_download_concurrency=_bounded_int(
+                "LUMEN_THUMBNAIL_DOWNLOAD_CONCURRENCY", 8, 16
             ),
             max_download_bytes=_bounded_int(
                 "LUMEN_MAX_IMAGE_MIB", 80, 100

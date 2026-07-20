@@ -27,11 +27,19 @@ from hosted_worker.config import WorkerLimits
 from hosted_worker.crawler import (
     Candidate,
     CandidateDownloadError,
+    SOURCE_ACTION_GROUP_SIZE,
+    _DownloadBudget,
+    _admit_with_backfill,
     _download,
+    _encode_candidates,
     _filter_near_duplicates,
     _frontier_pages,
     _initial_frontier,
+    _insert_candidate,
+    _materialize_candidate,
     _select_candidates,
+    _stage_candidate,
+    _validate_thumbnail,
     crawl_job,
 )
 from hosted_worker.runner import dispatch
@@ -153,6 +161,78 @@ import image_ranker.ml
                     )
             self.assertEqual(opener.call_count, 3)
             self.assertFalse(destination.exists())
+
+    def test_shared_download_budget_never_exceeds_aggregate_cap(self):
+        budget = _DownloadBudget(10, "aggregate test cap")
+        budget.consume(6)
+        with self.assertRaisesRegex(RuntimeError, "aggregate test cap reached"):
+            budget.consume(5)
+        self.assertEqual(budget.used, 6)
+        self.assertEqual(budget.remaining, 4)
+
+        second = _DownloadBudget(10, "reservation cap")
+        self.assertEqual(second.reserve(7), 7)
+        self.assertEqual(second.reserve(7), 3)
+        with self.assertRaisesRegex(RuntimeError, "reservation cap reached"):
+            second.reserve(1)
+        self.assertEqual(second.used, 10)
+
+    def test_streaming_download_does_not_read_past_per_file_cap(self):
+        class Response:
+            headers = {}
+
+            def __init__(self):
+                self.body = b"abcdef"
+                self.position = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self, amount):
+                chunk = self.body[self.position : self.position + amount]
+                self.position += len(chunk)
+                return chunk
+
+        response = Response()
+        budget = _DownloadBudget(10, "aggregate cap")
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "candidate.jpg"
+            with patch("urllib.request.urlopen", return_value=response):
+                with self.assertRaisesRegex(RuntimeError, "5-byte image cap"):
+                    _download(
+                        "https://upload.wikimedia.org/candidate.jpg",
+                        destination,
+                        maximum=5,
+                        budget=budget,
+                    )
+        self.assertEqual(response.position, 5)
+        self.assertEqual(budget.used, 5)
+
+    def test_commons_pregenerated_thumbnail_is_normalized_to_512px(self):
+        # Commons currently reports a 384x512 target for this shape while its
+        # returned pregenerated URL contains a real 500x667 image.
+        checkerboard = np.tile(
+            np.asarray([[0, 255], [255, 0]], dtype=np.uint8),
+            (334, 250),
+        )[:667, :500]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "thumbnail.jpg"
+            Image.fromarray(checkerboard).save(path, format="JPEG", quality=95)
+            _validate_thumbnail(
+                path,
+                {"thumbnail_width": 384, "thumbnail_height": 512},
+            )
+            with Image.open(path) as normalized:
+                self.assertEqual(normalized.format, "WEBP")
+                self.assertLessEqual(max(normalized.size), 512)
+                self.assertAlmostEqual(
+                    normalized.width / normalized.height,
+                    384 / 512,
+                    places=2,
+                )
 
     def test_near_duplicate_filter_preserves_diverse_candidate_order(self):
         vectors = [
@@ -418,7 +498,7 @@ import image_ranker.ml
         self.assertEqual(calls[0][1], {})
         self.assertEqual(calls[1][1], {"cursor": "next"})
         self.assertEqual(calls[2][1], {})
-        self.assertEqual([call[2] for call in calls], [1, 1, 1])
+        self.assertEqual([call[2] for call in calls], [3, 2, 1])
         self.assertEqual(frontier["continuations"][first], {})
         self.assertEqual(frontier["continuations"][second], {})
 
@@ -451,6 +531,84 @@ import image_ranker.ml
         self.assertEqual([result.pages[0]["provider_page_id"] for result in results], [1, 2])
         self.assertEqual([arm for arm, _available in selected], [first, second])
         self.assertNotIn(first, selected[1][1])
+
+    def test_bandit_frontier_scans_two_thousand_records_in_bounded_groups(self):
+        frontier = _initial_frontier()
+        requested_limits = []
+
+        def selector(available):
+            arm = available[0]
+            return BanditDecision(arm, 1.0, {arm: 1.0})
+
+        def loader(_name, continuation, limit, _delay):
+            requested_limits.append(limit)
+            cursor = int(continuation.get("cursor", 0))
+            return (
+                [
+                    {"provider_page_id": cursor * SOURCE_ACTION_GROUP_SIZE + index}
+                    for index in range(limit)
+                ],
+                {"cursor": str(cursor + 1)},
+            )
+
+        pages = list(
+            _frontier_pages(
+                frontier,
+                2_000,
+                request_delay=0,
+                page_loader=loader,
+                arm_selector=selector,
+                action_starter=lambda index, _decision: index + 1,
+                max_actions=100,
+            )
+        )
+        self.assertEqual(len(pages), 100)
+        self.assertEqual(sum(len(page.pages) for page in pages), 2_000)
+        self.assertEqual(requested_limits, [SOURCE_ACTION_GROUP_SIZE] * 100)
+        self.assertEqual(len({page.action_id for page in pages}), 100)
+
+    def test_bandit_frontier_action_cap_stops_empty_continuation_loop(self):
+        frontier = _initial_frontier()
+        calls = 0
+
+        def selector(available):
+            arm = available[0]
+            return BanditDecision(arm, 1.0, {arm: 1.0})
+
+        def empty_loader(_name, _continuation, _limit, _delay):
+            nonlocal calls
+            calls += 1
+            return [], {"cursor": str(calls)}
+
+        pages = list(
+            _frontier_pages(
+                frontier,
+                2_000,
+                request_delay=0,
+                page_loader=empty_loader,
+                arm_selector=selector,
+                action_starter=lambda index, _decision: index + 1,
+                max_actions=7,
+            )
+        )
+        self.assertEqual(len(pages), 7)
+        self.assertEqual(calls, 7)
+
+    def test_frontier_rejects_provider_pages_larger_than_requested(self):
+        frontier = _initial_frontier()
+
+        def oversized_loader(_name, _continuation, limit, _delay):
+            return [{"id": index} for index in range(limit + 1)], None
+
+        with self.assertRaisesRegex(RuntimeError, "requested record limit"):
+            list(
+                _frontier_pages(
+                    frontier,
+                    2,
+                    request_delay=0,
+                    page_loader=oversized_loader,
+                )
+            )
 
     def test_training_window_bounds_participants_without_library_failure(self):
         comparisons = [
@@ -916,19 +1074,42 @@ import image_ranker.ml
         self.assertEqual(limits.max_crawl_imports_per_day, 4)
 
         with patch.dict(
-            os.environ, {"LUMEN_MAX_CRAWL_IMPORTS_PER_DAY": "6"}, clear=True
+            os.environ, {"LUMEN_MAX_CRAWL_IMPORTS_PER_DAY": "101"}, clear=True
         ):
-            with self.assertRaisesRegex(ValueError, "between 1 and 5"):
+            with self.assertRaisesRegex(ValueError, "between 1 and 100"):
                 WorkerLimits.load()
+
+    def test_discovery_limits_have_explicit_bounded_defaults(self):
+        limits = WorkerLimits()
+        self.assertEqual(limits.max_crawl_imports_per_run, 10)
+        self.assertEqual(limits.max_crawl_imports_per_day, 100)
+        self.assertEqual(limits.max_crawl_candidates, 1_000)
+        self.assertEqual(limits.max_crawl_scans, 2_000)
+        self.assertEqual(limits.max_crawl_action_groups, 100)
+        self.assertEqual(limits.max_thumbnail_bytes, 2 * 1024 * 1024)
+        self.assertEqual(limits.max_total_thumbnail_bytes, 256 * 1024 * 1024)
+        self.assertEqual(limits.thumbnail_download_concurrency, 8)
+        self.assertEqual(limits.max_total_download_bytes, 300 * 1024 * 1024)
+
+        invalid_settings = (
+            ("LUMEN_MAX_THUMBNAIL_MIB", "5", "between 1 and 4"),
+            ("LUMEN_MAX_TOTAL_THUMBNAIL_MIB", "513", "between 1 and 512"),
+            ("LUMEN_THUMBNAIL_DOWNLOAD_CONCURRENCY", "17", "between 1 and 16"),
+        )
+        for name, value, message in invalid_settings:
+            with self.subTest(name=name):
+                with patch.dict(os.environ, {name: value}, clear=True):
+                    with self.assertRaisesRegex(ValueError, message):
+                        WorkerLimits.load()
 
     def test_daily_allowance_enforces_run_and_day_caps(self):
         limits = WorkerLimits(
-            max_crawl_imports_per_run=4,
-            max_crawl_imports_per_day=5,
+            max_crawl_imports_per_run=10,
+            max_crawl_imports_per_day=100,
         )
-        self.assertEqual(limits.crawl_allowance(0, 100), 4)
-        self.assertEqual(limits.crawl_allowance(3, 100), 2)
-        self.assertEqual(limits.crawl_allowance(5, 1), 0)
+        self.assertEqual(limits.crawl_allowance(0, 100), 10)
+        self.assertEqual(limits.crawl_allowance(95, 100), 5)
+        self.assertEqual(limits.crawl_allowance(100, 1), 0)
 
     def test_model_guided_selection_reserves_exploration(self):
         candidates = []
@@ -953,15 +1134,267 @@ import image_ranker.ml
             )
         selected = _select_candidates(
             candidates,
-            5,
+            10,
             "google-sub",
             PreferenceHead(np.asarray([1.0], dtype=np.float32)),
         )
-        self.assertEqual(len(selected), 5)
-        self.assertEqual(sum(item.selection_mode == "taste" for item in selected), 4)
+        self.assertEqual(len(selected), 10)
+        self.assertEqual(sum(item.selection_mode == "taste" for item in selected), 8)
         self.assertEqual(
-            sum(item.selection_mode == "exploration" for item in selected), 1
+            sum(item.selection_mode == "exploration" for item in selected), 2
         )
+
+    def test_model_guided_admission_backfills_failed_finalists_by_rank(self):
+        candidates = [
+            Candidate(
+                metadata={"provider_sha1": f"sha-{index}"},
+                path=Path(f"{index}.webp"),
+                embedding=np.asarray([1.0], dtype=np.float32),
+                score=float(20 - index),
+                action_id=index + 1,
+                discovery_index=index,
+            )
+            for index in range(16)
+        ]
+        calls = []
+
+        def attempt(candidate, mode):
+            calls.append((candidate.discovery_index, mode))
+            return len(calls) > 2
+
+        admitted = _admit_with_backfill(
+            candidates,
+            10,
+            "google-sub",
+            PreferenceHead(np.asarray([1.0], dtype=np.float32)),
+            "2026-07-19",
+            attempt,
+        )
+        self.assertEqual(len(admitted), 10)
+        self.assertEqual(len(calls), 12)
+        self.assertEqual(sum(item.selection_mode == "taste" for item in admitted), 8)
+        self.assertEqual(
+            sum(item.selection_mode == "exploration" for item in admitted), 2
+        )
+        self.assertEqual(len({item.action_id for item in admitted}), 10)
+        self.assertTrue({0, 1}.isdisjoint(item.discovery_index for item in admitted))
+
+    def test_failed_action_finalist_backfills_from_same_action(self):
+        candidates = [
+            Candidate(
+                metadata={"provider_sha1": f"sha-{index}"},
+                path=Path(f"{index}.webp"),
+                embedding=np.asarray([1.0], dtype=np.float32),
+                score=float(10 - index),
+                action_id=action_id,
+                discovery_index=index,
+            )
+            for index, action_id in enumerate((1, 1, 2, 3))
+        ]
+        attempted = []
+
+        def attempt(candidate, _mode):
+            attempted.append(candidate.discovery_index)
+            return candidate.discovery_index != 0
+
+        admitted = _admit_with_backfill(
+            candidates,
+            2,
+            "google-sub",
+            PreferenceHead(np.asarray([1.0], dtype=np.float32)),
+            "2026-07-19",
+            attempt,
+        )
+        self.assertEqual(attempted[:2], [0, 1])
+        self.assertEqual(len(admitted), 2)
+        self.assertEqual(len({candidate.action_id for candidate in admitted}), 2)
+        self.assertIn(1, [candidate.discovery_index for candidate in admitted])
+
+    def test_thumbnail_encoder_scores_one_thousand_candidates_in_one_pool(self):
+        candidates = [
+            Candidate(metadata={}, path=Path(f"thumbnail-{index}.jpg"))
+            for index in range(1_000)
+        ]
+
+        class Runtime:
+            def encode(self, paths, *, batch_size):
+                self.paths = paths
+                self.batch_size = batch_size
+                return np.tile(
+                    np.asarray([[1.0, 0.0]], dtype=np.float32),
+                    (len(paths), 1),
+                )
+
+        runtime = Runtime()
+        returned = _encode_candidates(candidates, WorkerLimits(), runtime)
+        self.assertIs(returned, runtime)
+        self.assertEqual(len(runtime.paths), 1_000)
+        self.assertEqual(runtime.batch_size, WorkerLimits().embedding_batch_size)
+        self.assertTrue(all(candidate.embedding is not None for candidate in candidates))
+
+    def test_finalist_embedding_is_recomputed_from_stored_preview(self):
+        checkerboard = np.tile(
+            np.asarray([[0, 255], [255, 0]], dtype=np.uint8),
+            (900, 1_300),
+        )
+        image = Image.fromarray(checkerboard).convert("RGB")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original_path = root / "original.jpg"
+            image.save(original_path, format="JPEG", quality=95, subsampling=0)
+            original = original_path.read_bytes()
+            candidate = Candidate(
+                metadata={
+                    "bytes": len(original),
+                    "height": 1_800,
+                    "mime": "image/jpeg",
+                    "source_url": "https://upload.wikimedia.org/original.jpg",
+                    "width": 2_600,
+                },
+                path=root / "thumbnail.jpg",
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+            )
+            budget = _DownloadBudget(len(original) + 1, "original cap")
+
+            def fake_download(_url, destination, *, maximum, budget):
+                self.assertLessEqual(len(original), maximum)
+                budget.consume(len(original))
+                destination.write_bytes(original)
+                return len(original)
+
+            class Runtime:
+                def encode(self, paths, *, batch_size):
+                    self.paths = list(paths)
+                    self.batch_size = batch_size
+                    with Image.open(paths[0]) as preview:
+                        self.format = preview.format
+                        self.size = preview.size
+                    return np.asarray([[0.0, 1.0]], dtype=np.float32)
+
+            runtime = Runtime()
+            with patch("hosted_worker.crawler._download", side_effect=fake_download):
+                materialized, reason, downloaded = _materialize_candidate(
+                    candidate,
+                    root,
+                    1,
+                    WorkerLimits(),
+                    budget,
+                    runtime,
+                    PreferenceHead(np.asarray([0.0, 1.0], dtype=np.float32)),
+                )
+
+            self.assertIs(materialized, candidate)
+            self.assertIsNone(reason)
+            self.assertTrue(downloaded)
+            self.assertEqual(runtime.batch_size, 1)
+            self.assertEqual(runtime.format, "WEBP")
+            self.assertEqual(max(runtime.size), 2_400)
+            self.assertEqual(candidate.payload.preview, candidate.path.read_bytes())
+            np.testing.assert_array_equal(
+                candidate.embedding,
+                np.asarray([0.0, 1.0], dtype=np.float32),
+            )
+            self.assertEqual(candidate.score, 1.0)
+
+    def test_candidate_db_writes_are_deferred_and_reuse_stored_embedding(self):
+        stored_embedding = np.asarray([0.0, 1.0], dtype=np.float32)
+        statements = []
+
+        class Cursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def execute(self, sql, params=()):
+                self.sql = sql
+                self.params = params
+                statements.append((sql, params))
+
+            def fetchone(self):
+                if "SELECT vector, dimensions" in self.sql:
+                    return {
+                        "vector": stored_embedding.astype("<f4").tobytes(),
+                        "dimensions": 2,
+                    }
+                if "RETURNING image_id" in self.sql:
+                    return {"image_id": 42}
+                raise AssertionError(f"unexpected fetch for {self.sql}")
+
+        cursor = Cursor()
+        connection = SimpleNamespace(
+            cursor=lambda: cursor,
+            commit=MagicMock(),
+        )
+        candidate = Candidate(
+            metadata={},
+            path=Path("preview.webp"),
+            payload=ImagePayload(
+                sha256="a" * 64,
+                extension="jpg",
+                width=1_600,
+                height=1_200,
+                original=b"original",
+                preview=b"preview",
+                thumbnail=b"thumbnail",
+            ),
+            embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+            existing_image_id=42,
+        )
+
+        with patch("hosted_worker.crawler.hosted_encoder_id", return_value="encoder"):
+            image_id = _insert_candidate(
+                connection,
+                "user",
+                candidate,
+                PreferenceHead(np.asarray([0.0, 1.0], dtype=np.float32)),
+            )
+        self.assertEqual(image_id, 42)
+        connection.commit.assert_not_called()
+        self.assertFalse(any("DO UPDATE" in sql for sql, _params in statements))
+        np.testing.assert_array_equal(candidate.embedding, stored_embedding)
+        self.assertEqual(candidate.score, 1.0)
+
+    def test_linked_exact_content_is_rejected_before_blob_upload(self):
+        class Cursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def execute(self, _sql, _params):
+                return None
+
+            def fetchone(self):
+                return {"id": 42, "already_linked": True}
+
+        connection = SimpleNamespace(
+            cursor=lambda: Cursor(),
+            commit=MagicMock(),
+        )
+        candidate = Candidate(
+            metadata={},
+            path=Path("preview.webp"),
+            payload=ImagePayload(
+                sha256="a" * 64,
+                extension="jpg",
+                width=1_600,
+                height=1_200,
+                original=b"original",
+                preview=b"preview",
+                thumbnail=b"thumbnail",
+            ),
+            embedding=np.asarray([1.0], dtype=np.float32),
+        )
+        with (
+            patch("hosted_worker.crawler.hosted_encoder_id", return_value="encoder"),
+            patch("hosted_worker.crawler.upload_image") as upload,
+        ):
+            self.assertFalse(_stage_candidate(connection, "user", candidate, None))
+        upload.assert_not_called()
+        connection.commit.assert_called_once_with()
 
     def test_candidate_selection_allows_only_one_import_per_source_action(self):
         candidates = []
@@ -1027,6 +1460,49 @@ import image_ranker.ml
         self.assertIsNone(result["source_policy"]["model_rating_count"])
         self.assertIsNone(result["source_policy"]["model_feedback_count"])
         self.assertIsInstance(result["source_policy"]["policy_seed"], int)
+
+    def test_promoted_taste_head_uses_full_discovery_targets(self):
+        captured = {}
+
+        def no_frontier_pages(frontier, maximum, **kwargs):
+            captured.update(kwargs)
+            captured["maximum"] = maximum
+            return iter(())
+
+        context = SimpleNamespace(
+            model_run_id=7,
+            comparison_count=40,
+            rating_count=10,
+            feedback_count=50,
+            head=PreferenceHead(np.asarray([1.0], dtype=np.float32)),
+        )
+        connection = SimpleNamespace(commit=lambda: None)
+        with (
+            patch("hosted_worker.crawler.imported_today", return_value=0),
+            patch("hosted_worker.crawler.load_reward_context", return_value=context),
+            patch("hosted_worker.crawler.refresh_human_feedback", return_value=0),
+            patch("hosted_worker.crawler.load_action_history", return_value=[]),
+            patch("hosted_worker.crawler._source_frontier", return_value=_initial_frontier()),
+            patch("hosted_worker.crawler._existing_user_provenance", return_value=(set(), set())),
+            patch(
+                "hosted_worker.crawler._existing_embedding_matrix",
+                return_value=np.empty((0, 0), dtype=np.float32),
+            ),
+            patch("hosted_worker.crawler._frontier_pages", side_effect=no_frontier_pages),
+        ):
+            result = crawl_job(
+                connection,
+                "user",
+                {"requested_imports": 10, "run_day": "2026-07-19"},
+                WorkerLimits(),
+                job_id=20,
+            )
+
+        self.assertEqual(captured["maximum"], 2_000)
+        self.assertEqual(captured["max_actions"], 100)
+        self.assertEqual(result["pool_size"], 1_000)
+        self.assertEqual(result["thumbnail_scored"], 0)
+        self.assertEqual(result["action_group_size"], SOURCE_ACTION_GROUP_SIZE)
 
     def test_image_payload_is_content_addressed_and_has_renditions(self):
         with tempfile.TemporaryDirectory() as directory:

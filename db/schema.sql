@@ -347,9 +347,15 @@ DROP INDEX IF EXISTS idx_crawl_bandit_direct_discovery_action;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_jobs_single_active
   ON worker_jobs ((TRUE))
   WHERE status IN ('queued', 'running');
-CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_jobs_crawl_day
-  ON worker_jobs(user_id, (input_json->>'run_day'))
-  WHERE kind = 'crawl';
+DROP INDEX IF EXISTS idx_worker_jobs_crawl_day;
+DROP INDEX IF EXISTS idx_worker_jobs_crawl_cutoff_day;
+CREATE UNIQUE INDEX idx_worker_jobs_crawl_cutoff_day
+  ON worker_jobs(
+    user_id,
+    (COALESCE(input_json->>'rating_cutoff','0')),
+    (input_json->>'run_day')
+  )
+  WHERE kind = 'crawl' AND status IN ('queued', 'running', 'succeeded');
 DROP INDEX IF EXISTS idx_worker_jobs_train_day;
 DROP INDEX IF EXISTS idx_worker_jobs_train_cutoff_day;
 CREATE UNIQUE INDEX idx_worker_jobs_train_cutoff_day

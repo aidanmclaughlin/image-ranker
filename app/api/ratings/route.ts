@@ -1,5 +1,5 @@
 import { auth } from "@/auth";
-import { enqueueTrainingIfDue } from "@/lib/jobs";
+import { enqueueCrawlIfDue, enqueueTrainingIfDue } from "@/lib/jobs";
 import { parseRatingInput } from "@/lib/rating-contract";
 import { InvalidRatingError, recordRating } from "@/lib/ranking";
 import { safeErrorMessage } from "@/lib/redaction";
@@ -30,6 +30,7 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const result = await recordRating(userId, input);
     await enqueueTrainingIfDue(userId);
+    await enqueueCrawlIfDue(userId);
     return Response.json(result, { status: 201 });
   } catch (error) {
     if (error instanceof InvalidRatingError) {

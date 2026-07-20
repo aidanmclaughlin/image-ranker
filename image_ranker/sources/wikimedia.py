@@ -29,6 +29,7 @@ MAX_RETRY_DELAY = 120.0
 RETRYABLE_HTTP_STATUSES = frozenset({429, 503})
 QUALITY_SAMPLE_EDGE = 256
 MIN_EDGE_ENERGY = 0.75
+DISCOVERY_THUMBNAIL_WIDTH = 512
 
 # The broad Featured Pictures root is ordered by filename and is a poor seed for
 # photographic taste. These direct-file categories intentionally start with
@@ -277,8 +278,12 @@ def _candidate_from_page(page: Mapping[str, Any], category: str) -> dict[str, An
     )
     return {
         "title": title.removeprefix("File:"),
-        # Deliberately use the original, not MediaWiki's optional thumbnail.
+        # Keep the original for finalist materialization and the bounded
+        # Commons rendition for cheap first-stage visual scoring.
         "source_url": _normalized_url(info.get("url")),
+        "thumbnail_url": _normalized_url(info.get("thumburl")),
+        "thumbnail_width": info.get("thumbwidth", 0),
+        "thumbnail_height": info.get("thumbheight", 0),
         "page_url": _normalized_url(info.get("descriptionurl")),
         "creator": creator,
         "license": _metadata_value(extmetadata, "LicenseShortName"),
@@ -326,6 +331,8 @@ def _category_files(
             "prop": "imageinfo",
             "iilimit": "1",
             "iiprop": "url|size|mime|sha1|mediatype|extmetadata",
+            "iiurlwidth": str(DISCOVERY_THUMBNAIL_WIDTH),
+            "iiurlheight": str(DISCOVERY_THUMBNAIL_WIDTH),
             "iiextmetadatafilter": "|".join(EXT_METADATA_FIELDS),
             **continuation,
         }
@@ -451,6 +458,29 @@ def rejection_reason(candidate: Mapping[str, Any]) -> str | None:
         not license_url and _has_public_domain_evidence(candidate)
     ):
         return "license URL does not match license"
+    return None
+
+
+def thumbnail_rejection_reason(candidate: Mapping[str, Any]) -> str | None:
+    """Validate the bounded Commons rendition used only for discovery scoring."""
+    if not _url_has_host(
+        str(candidate.get("thumbnail_url") or ""), "upload.wikimedia.org"
+    ):
+        return "invalid thumbnail provenance"
+    try:
+        width = int(candidate.get("thumbnail_width", 0))
+        height = int(candidate.get("thumbnail_height", 0))
+        source_width = int(candidate.get("width", 0))
+        source_height = int(candidate.get("height", 0))
+    except (TypeError, ValueError):
+        return "invalid thumbnail dimensions"
+    if (
+        min(width, height) < 1
+        or max(width, height) > DISCOVERY_THUMBNAIL_WIDTH
+        or width > source_width
+        or height > source_height
+    ):
+        return "invalid thumbnail dimensions"
     return None
 
 

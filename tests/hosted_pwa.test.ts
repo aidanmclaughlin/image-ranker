@@ -75,8 +75,37 @@ test("hosted ranking uses one photograph and an accessible five-dot scale", asyn
   assert.match(component, /className="visually-hidden">Lumen</);
   assert.match(component, /className="visually-hidden">Skip</);
   assert.match(component, /className="visually-hidden">Ranked list</);
-  assert.match(styles, /\.rating-photo img\s*\{[\s\S]*?object-fit:\s*contain/);
+  const ratingImageRule = styles.match(/\.rating-photo img\s*\{([\s\S]*?)\}/)?.[1] ?? "";
+  assert.match(ratingImageRule, /width:\s*100%/);
+  assert.match(ratingImageRule, /max-width:\s*100%/);
+  assert.match(ratingImageRule, /height:\s*100%/);
+  assert.match(ratingImageRule, /max-height:\s*100%/);
+  assert.match(ratingImageRule, /object-fit:\s*contain/);
+  assert.doesNotMatch(ratingImageRule, /object-fit:\s*cover/);
+  assert.match(styles, /\.hosted-rank-view \.rating-stage\s*\{[\s\S]*?overflow:\s*hidden/);
+  assert.match(styles, /\.rating-photo\s*\{[\s\S]*?overflow:\s*hidden/);
+
+  const ratingTransforms = [...styles.matchAll(/(?:\.rating-photo|\.rating-stage)[^{]*img[^}]*\{([^}]*)\}/g)]
+    .flatMap((match) => [...match[1].matchAll(/scale\(([\d.]+)\)/g)])
+    .map((match) => Number(match[1]));
+  assert.ok(ratingTransforms.every((scale) => scale <= 1), "rating transitions must never crop the photograph");
   assert.match(styles, /\.rating-scale\s*\{[\s\S]*?position:\s*absolute/);
   assert.match(styles, /\.rating-value\s*\{[\s\S]*?width:\s*42px[\s\S]*?height:\s*42px/);
   assert.match(styles, /\.hosted-rank-view \.account-avatar\s*\{[\s\S]*?font-size:\s*0/);
+});
+
+test("an empty rating queue polls quietly without overlapping requests", async () => {
+  const component = await readFile(
+    new URL("../components/lumen-app.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(component, /const ratingLoadInFlight = useRef\(false\)/);
+  assert.match(component, /if \(ratingLoadInFlight\.current\) return/);
+  assert.match(component, /ratingLoadInFlight\.current = true/);
+  assert.match(component, /finally \{\s*ratingLoadInFlight\.current = false/);
+  assert.match(component, /if \(view !== "rank" \|\| ratingState !== "empty"\) return/);
+  assert.match(component, /window\.setInterval\(\(\) => \{\s*void loadRating\(\);\s*\}, 30_000\)/);
+  assert.match(component, /return \(\) => window\.clearInterval\(poll\)/);
+  assert.match(component, /className="visually-hidden">No unrated photographs are available\./);
 });

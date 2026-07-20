@@ -24,6 +24,8 @@ flowchart LR
     Browser["Browser / installed web app"] -->|"Google session"| Next["Next.js on Vercel"]
     Next -->|"ratings, legacy Elo, and policy logs"| Neon["Neon Postgres"]
     Next -->|"short-lived signed reads"| Blob["Private Vercel Blob"]
+    Next -->|"durable low-backlog wake"| Queue["Vercel Queue"]
+    Queue --> Next
     Cron["Vercel Cron or owner action"] --> Next
     Next -->|"one bounded job"| Sandbox["Vercel Sandbox"]
     Sandbox -->|"ratings, comparisons, embeddings, model runs"| Neon
@@ -145,7 +147,7 @@ The production schedules are intentionally modest:
 | Route | UTC schedule | Behavior |
 | --- | --- | --- |
 | `/api/cron/train` | `0 7 * * *` | Trains only when a rating or legacy-comparison threshold is due. |
-| `/api/cron/crawl` | `0 8 * * *` | Imports a small rights-clean batch within the daily cap. |
+| `/api/cron/crawl` | `0 8 * * *` | Reconciles any due 50-image refill not already launched by a rating event. |
 
 Vercel Cron sends `Authorization: Bearer $CRON_SECRET`; the routes reject requests without that exact value. The authenticated `/api/jobs` endpoint exposes the same scheduler for owner-only diagnostics, while `/api/jobs/:id` reports progress.
 
@@ -184,7 +186,7 @@ See [scripts/MIGRATION.md](scripts/MIGRATION.md) for the migration-specific chec
 
 ## Use on desktop and mobile
 
-Open the production URL and continue with the allowlisted Google account. One photograph always fills the ranking viewport; press `1`–`5` to rate it or `S` to skip, and use the collection icon to open the ranked list.
+Open the production URL and continue with the allowlisted Google account. The ranking viewport always shows the photograph's complete native frame without cropping; letterboxing preserves unusual aspect ratios. Press `1`–`5` to rate it or `S` to skip, and use the collection icon to open the ranked list.
 
 On iPhone or iPad, open the site in Safari and choose **Share → Add to Home Screen**. On Android, use the browser's **Install app** action when offered. Use the five controls or a horizontal swipe whose strength expresses 1–5; swipe up to skip. The collection shows direct ratings and retained legacy Elo; tapping a card opens its original and attribution.
 
@@ -196,7 +198,7 @@ The Mac does not need to be online after deployment. A network connection is req
 - **Legacy ranking:** existing pairwise comparisons and Elo remain intact; no synthetic rating is inferred from them.
 - **Taste model:** normalized OpenCLIP ViT-B/32 embeddings are cached once. One regularized scalar utility is trained with a cumulative ordinal/CORAL loss on ratings and a Bradley–Terry loss on legacy comparisons; deterministic bootstrap replicas estimate uncertainty.
 - **Training cadence:** ratings retrain every five labels through 50 and every 10 thereafter; five labels create the first candidate, 10 provide the first train/holdout split eligible for promotion, and each later five-label batch can be evaluated against the promoted head. Legacy comparisons keep their every-20-through-100, then every-50 cadence, and either due stream launches one cutoff-pinned, idempotent joint run.
-- **Discovery:** candidates pass rights, full-decode, resolution, megapixel, byte, corruption, and duplicate gates. The shared visual utility may pre-screen valid candidates, but its prediction is never a crawler reward.
+- **Discovery:** each taste-guided refill scans up to 2,000 source records, applies rights/resolution/provenance gates, and visually scores up to 1,000 bounded 512px Commons thumbnails. Only 10 finalists are downloaded as full originals; eight optimize predicted taste and two preserve candidate-level exploration. Full-decode, byte, corruption, and duplicate gates run again before storage, and failed finalists are backfilled by rank.
 - **Crawler controller:** discounted EXP3-IX selects among source categories from the first crawl, initially uniformly. It is a context-free source bandit, not a second learned vision model and not deep reinforcement learning.
 - **Reward:** at most one imported photograph is credited to an action; its direct reward is `(rating - 1) / 4`. A fully evaluated action that imports nothing gets zero, while unrated imports remain pending and failed or censored actions are excluded.
 - **Exploration and audit:** source selection mixes in 20% randomized, exactly propensity-logged exploration. Policy versions prevent obsolete reward definitions from mixing with current history.
@@ -219,17 +221,19 @@ Never make the Blob store public, commit `.env*`, log OAuth or database credenti
 
 ## Worker and cost controls
 
-The hosted path has no always-on VM or GPU. Interactive work uses short Vercel Functions; heavy work runs only when a due job launches a four-vCPU/eight-GB CPU Sandbox from the prepared snapshot.
+The hosted path has no always-on VM or GPU. Interactive work uses short Vercel Functions; heavy work runs only when a due job launches a source-pinned CPU Sandbox. Training uses four vCPUs/eight GB, while broad visual discovery uses eight vCPUs/16 GB.
 
 Hard controls in the scheduler and worker include:
 
 - one active worker globally, reinforced by a database advisory lock;
-- an 11-minute training timeout and eight-minute crawl timeout, supervised by a function capped at 780 seconds;
+- an 11-minute Sandbox timeout, with discovery commands capped at 10 minutes and supervised by a function capped at 780 seconds;
 - idempotent rating and comparison cutoffs with unique model runs;
 - at most one training attempt per joint cutoff and UTC day, plus three failed attempts per cutoff in any rolling seven-day window, with automatic retry after the window;
 - bounded rating and comparison inputs and at most 2,000 training images in one training run;
-- at most five imports per run and per UTC day, drawn from no more than 20 eligible candidates and 100 provider records;
-- a 20-image labeling-backlog gate and persisted per-category Wikimedia continuation frontier so discovery neither outruns the owner nor rescans the same prefix forever;
+- at most 10 imports per run and 100 per UTC day, drawn from no more than 1,000 visually scored thumbnails and 2,000 provider records;
+- a 50-image labeling-backlog trigger, rating-driven Vercel Queue wakeups, and a daily reconciliation cron, so replenishment survives an already-running training job without outrunning the owner;
+- a persisted per-category Wikimedia continuation frontier so discovery does not rescan the same prefix forever;
+- 2 MiB per-thumbnail and 256 MiB aggregate thumbnail defaults, with hard ceilings of 4 MiB and 512 MiB respectively;
 - an 80 MiB default per-image download cap, 100 MiB absolute per-image ceiling, and 300 MiB total-download ceiling per job;
 - content-addressed deduplication before storage;
 - previews and thumbnails for ordinary UI traffic, reserving originals for the lightbox;

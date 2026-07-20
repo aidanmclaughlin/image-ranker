@@ -1,6 +1,18 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
+  "functions": {
+    "app/api/queues/crawl/route.ts": {
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "lumen-crawl-wakeup",
+          "retryAfterSeconds": 30,
+          "initialDelaySeconds": 0
+        }
+      ]
+    }
+  },
   "crons": [
     { "path": "/api/cron/train", "schedule": "0 7 * * *" },
     { "path": "/api/cron/crawl", "schedule": "0 8 * * *" }

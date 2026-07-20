@@ -392,6 +392,7 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
   const dialog = useRef<HTMLDialogElement>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ratingRequest = useRef(0);
+  const ratingLoadInFlight = useRef(false);
   const pointerStart = useRef<{ x: number; y: number } | null>(null);
 
   const announce = useCallback((message: string) => {
@@ -409,6 +410,8 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
   }, [announce]);
 
   const loadRating = useCallback(async (excludeId?: number) => {
+    if (ratingLoadInFlight.current) return;
+    ratingLoadInFlight.current = true;
     const requestId = ++ratingRequest.current;
     try {
       const path = excludeId
@@ -435,6 +438,8 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
       setRatingItem(null);
       setRatingState("error");
       announce(error instanceof Error ? error.message : "Could not load a photograph.");
+    } finally {
+      ratingLoadInFlight.current = false;
     }
   }, [announce]);
 
@@ -486,6 +491,14 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
     window.addEventListener("hashchange", readHash);
     return () => window.removeEventListener("hashchange", readHash);
   }, []);
+
+  useEffect(() => {
+    if (view !== "rank" || ratingState !== "empty") return;
+    const poll = window.setInterval(() => {
+      void loadRating();
+    }, 30_000);
+    return () => window.clearInterval(poll);
+  }, [loadRating, ratingState, view]);
 
   useEffect(() => {
     if (view !== "collection" || leaderboardLoaded) return;

@@ -255,6 +255,49 @@ async function main(): Promise<void> {
     if (!trainIndex.rows[0]?.definition.includes("rating_cutoff")) {
       throw new Error("Training job uniqueness omits the rating cutoff");
     }
+    await client.query(
+      `INSERT INTO worker_jobs(user_id,kind,status,input_json,output_json)
+       VALUES
+         ($1,'crawl','succeeded',
+          jsonb_build_object('rating_cutoff','100','run_day','2099-01-02'),
+          '{}'::jsonb),
+         ($1,'crawl','succeeded',
+          jsonb_build_object('rating_cutoff','101','run_day','2099-01-02'),
+          '{}'::jsonb),
+         ($1,'crawl','failed',
+          jsonb_build_object('rating_cutoff','100','run_day','2099-01-02'),
+          '{}'::jsonb)`,
+      [userId],
+    );
+    await client.query("SAVEPOINT duplicate_crawl_cutoff");
+    try {
+      await client.query(
+        `INSERT INTO worker_jobs(user_id,kind,status,input_json,output_json)
+         VALUES(
+           $1,'crawl','succeeded',
+           jsonb_build_object('rating_cutoff','100','run_day','2099-01-02'),
+           '{}'::jsonb
+         )`,
+        [userId],
+      );
+      throw new Error("Duplicate crawl cutoff unexpectedly succeeded");
+    } catch (error) {
+      const databaseError = error as { code?: string };
+      await client.query("ROLLBACK TO SAVEPOINT duplicate_crawl_cutoff");
+      if (databaseError.code !== "23505") throw error;
+    }
+    const crawlIndex = await client.query<{ definition: string }>(
+      `SELECT pg_get_indexdef(indexrelid) AS definition
+         FROM pg_index
+         JOIN pg_class ON pg_class.oid=indexrelid
+        WHERE pg_class.relname='idx_worker_jobs_crawl_cutoff_day'`,
+    );
+    if (
+      !crawlIndex.rows[0]?.definition.includes("rating_cutoff") ||
+      !crawlIndex.rows[0]?.definition.includes("succeeded")
+    ) {
+      throw new Error("Crawl job uniqueness omits cutoff or retry state");
+    }
     await client.query("SAVEPOINT immutable_rating");
     try {
       await client.query(

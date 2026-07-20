@@ -93,14 +93,17 @@ test("hosted routes expose the single-image rating API contract", async () => {
   assert.match(getRoute, /private, no-store/);
   assert.match(postRoute, /parseRatingInput/);
   assert.match(postRoute, /recordRating\(userId, input\)/);
+  assert.match(postRoute, /enqueueCrawlIfDue\(userId\)/);
   assert.match(postRoute, /enqueueTrainingIfDue\(userId\)/);
+  assert.match(postRoute, /enqueueTrainingIfDue\(userId\)[\s\S]+enqueueCrawlIfDue\(userId\)/);
   assert.match(postRoute, /export const maxDuration = 780/);
   assert.match(ranking, /ui\.point_rating IS NULL/);
   assert.match(ranking, /MAX\(issuance\.issued_at\) AS last_issued_at/);
   assert.match(ranking, /last_issued_at ASC NULLS FIRST/);
   assert.match(ranking, /ui\.point_rating DESC NULLS LAST/);
   assert.match(ranking, /SELECT COUNT\(\*\) AS count FROM image_ratings/);
-  assert.match(jobs, /ui\.point_rating IS NULL[\s\S]+ui\.matches = 0/);
+  assert.match(jobs, /ui\.point_rating IS NULL/);
+  assert.doesNotMatch(jobs, /ui\.point_rating IS NULL[\s\S]{0,80}ui\.matches = 0/);
   assert.match(workerRole, /image_ratings: new Set\(\["select"\]\)/);
   assert.match(workerRole, /GRANT SELECT ON comparisons, image_ratings/);
   assert.match(workerRole, /UPDATE \(predicted_utility\) ON user_images/);

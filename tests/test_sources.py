@@ -44,6 +44,9 @@ def api_page(
         "imageinfo": [
             {
                 "url": f"https://upload.wikimedia.org/wikipedia/commons/{sha1}/{name}.jpg",
+                "thumburl": f"https://upload.wikimedia.org/wikipedia/commons/thumb/{sha1}/{name}.jpg/512px-{name}.jpg",
+                "thumbwidth": 512,
+                "thumbheight": 384,
                 "descriptionurl": f"https://commons.wikimedia.org/wiki/File:{name}.jpg",
                 "width": 2000,
                 "height": 1500,
@@ -139,7 +142,11 @@ class WikimediaSourceTests(unittest.TestCase):
         self.assertEqual(params["generator"], "categorymembers")
         self.assertEqual(params["iilimit"], "1")
         self.assertIn("LicenseShortName", params["iiextmetadatafilter"])
-        self.assertNotIn("iiurlwidth", params)
+        self.assertEqual(params["iiurlwidth"], "512")
+        self.assertEqual(params["iiurlheight"], "512")
+        self.assertEqual(files[0]["thumbnail_width"], 512)
+        self.assertEqual(files[0]["thumbnail_height"], 384)
+        self.assertIn("/thumb/", files[0]["thumbnail_url"])
 
     def test_api_honors_retry_after_then_returns_success(self):
         sleeps: list[float] = []
@@ -273,6 +280,22 @@ class WikimediaSourceTests(unittest.TestCase):
         self.assertEqual(
             wikimedia.rejection_reason({**nara_public_domain, "license_identifier": ""}),
             "license URL does not match license",
+        )
+
+    def test_thumbnail_gate_requires_bounded_commons_rendition(self):
+        valid = candidate("Thumbnail")
+        self.assertIsNone(wikimedia.thumbnail_rejection_reason(valid))
+        self.assertEqual(
+            wikimedia.thumbnail_rejection_reason(
+                {**valid, "thumbnail_url": "https://example.com/512px-photo.jpg"}
+            ),
+            "invalid thumbnail provenance",
+        )
+        self.assertEqual(
+            wikimedia.thumbnail_rejection_reason(
+                {**valid, "thumbnail_width": 513}
+            ),
+            "invalid thumbnail dimensions",
         )
 
     def test_known_license_hosts_are_upgraded_to_https(self):
