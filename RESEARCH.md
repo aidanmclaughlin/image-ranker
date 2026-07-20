@@ -2,66 +2,84 @@
 
 ## Executive decision
 
-This is a **single-user, inductive preference-learning** problem, not ordinary image classification and not generic aesthetic assessment. The system must learn a function that assigns a latent utility to a previously unseen photograph from a small number of noisy pairwise choices, while separately maintaining an interpretable ranking of photographs the user has actually judged.
+This is a **single-user, inductive preference-learning** problem, not ordinary image classification and not generic aesthetic assessment. The primary observation is now one 1–5 ordinal judgment of one full-screen photograph; legacy pairwise choices remain valuable evidence and keep their historical Elo, but new labeling no longer requires two images at once. Strictly, a single-item score is an ordinal rating or Likert-type item, not a multi-item Likert scale.
 
 The recommended first model is deliberately small:
 
 1. Decode the whole image with a fixed, versioned preprocessing pipeline.
 2. Cache a normalized embedding from a frozen vision foundation model.
-3. Learn one regularized scalar utility function from embedding differences with a Bradley–Terry logistic loss.
-4. Use that function only to predict personal taste and to choose informative candidates.
-5. Keep live Elo for instant UI feedback, but periodically refit an item-only Bradley–Terry model over the complete comparison graph for the canonical ranking.
+3. Learn one regularized scalar visual utility with ordered thresholds: cumulative ordinal/CORAL loss consumes 1–5 ratings, while Bradley–Terry loss consumes the immutable legacy comparisons.
+4. Use deterministic bootstrap replicas of that same head for uncertainty; this is one model family, not a separate reward model.
+5. Use predicted utility only to pre-screen technically valid candidates. Never feed a prediction back as crawler reward.
+6. Give the context-free EXP3 source controller only the owner's direct normalized rating, `(rating - 1) / 4`, for the single image attributable to its action.
+7. Preserve observed point ratings and historical Elo in the collection rather than fabricating one label type from the other.
 
-The repository currently ships **OpenCLIP ViT-B/32** as the practical baseline because it is open, reproducible, feasible in a bounded CPU Sandbox (and on a local Mac), and already integrated. The research recommendation is not that OpenCLIP is known to be the best aesthetics encoder—there is no paper establishing that for this exact one-person regime—but that it is the correct baseline to beat. DINOv2 and SigLIP/SigLIP 2 should be evaluated on the same image-disjoint comparisons before any encoder is promoted or combined.
+The repository currently ships **OpenCLIP ViT-B/32** as the practical baseline because it is open, reproducible, feasible in a bounded CPU Sandbox (and on a local Mac), and already integrated. The research recommendation is not that OpenCLIP is known to be the best aesthetics encoder—there is no paper establishing that for this exact one-person regime—but that it is the correct baseline to beat. DINOv2 and SigLIP/SigLIP 2 should be evaluated on the same image-disjoint rating and comparison folds before any encoder is promoted or combined.
 
-Population aesthetics models, award status, resolution, and source curation are useful **quality priors and acquisition filters**, never substitutes for the user's choices. The personal preference model must be trained only from the user's labels. Images, comparison history, embeddings, and model artifacts stay in private deployer-controlled runtime resources and outside Git.
+Population aesthetics models, award status, resolution, and source curation are useful **quality priors and acquisition filters**, never substitutes for the user's choices. The personal utility head is trained only from the owner's ratings and legacy comparisons, and the crawler controller is rewarded only by a direct rating. Images, rating and comparison history, embeddings, and model artifacts stay in private deployer-controlled runtime resources and outside Git.
 
 ## 1. Problem formulation
 
-For image \(i\), let \(z_i \in \mathbb{R}^d\) be its frozen visual embedding and let \(s_\theta(z_i)\) be the user's predicted utility. A comparison is \((i,j,y)\), where \(y=1\) means the user chose \(i\) over \(j\). The feature-aware Bradley–Terry model is
+For image \(i\), let \(z_i \in \mathbb{R}^d\) be its frozen visual embedding and let \(s_\theta(z_i)\) be the user's predicted scalar utility. A point rating is \(r_i\in\{1,2,3,4,5\}\). Four ordered thresholds \(b_1\leq\cdots\leq b_4\) define cumulative ordinal probabilities
+
+\[
+P(r_i>k)=\sigma\left(\frac{s_\theta(z_i)-b_k}{\tau_o}\right),\qquad k=1,\ldots,4.
+\]
+
+Training the four cumulative binary targets with shared weights follows the rank-consistent CORAL formulation ([Cao, Mirjalili & Raschka, 2020](https://arxiv.org/abs/1901.07884)). Unlike ordinary five-way classification, it encodes that mistaking a 5 for a 4 is less severe than mistaking it for a 1.
+
+A legacy comparison is \((i,j,y)\), where \(y=1\) means the user chose \(i\) over \(j\). The same scalar utility enters the feature-aware Bradley–Terry model:
 
 \[
 P(i \succ j)=\sigma\left(\frac{s_\theta(z_i)-s_\theta(z_j)}{\tau}\right).
 \]
 
-The initial utility is linear, \(s_\theta(z)=w^Tz\), trained with binary cross-entropy and L2 regularization. The intercept is omitted because it cancels in every score difference. The temperature \(\tau\), or an equivalent scale constraint on \(w\), is needed because pairwise data identify relative location and scale only up to the model's convention.
+The initial utility is linear, \(s_\theta(z)=w^Tz\), with an L2 penalty. Its joint objective is
+
+\[
+\mathcal L=\lambda_o\mathcal L_{\mathrm{ordinal}}+
+\lambda_p\mathcal L_{\mathrm{BT}}+\lambda_2\lVert w\rVert_2^2,
+\]
+
+with each stream normalized before weighting so a large historical comparison table cannot drown out fresh ratings. The ordinal thresholds anchor absolute score levels; the Bradley–Terry term contributes relative directions and is invariant to a shared score offset. This is a single shared utility model trained from two observation types, not two taste models.
 
 This formulation has three useful properties:
 
-- Every label teaches a direction in feature space, so a choice between two known images can improve predictions for unseen images.
-- Swapping left and right negates the input difference, making symmetry explicit and exposing position bias when it occurs.
-- The model yields a probability, so log loss, calibration, uncertainty, and active-query policies are all well defined.
+- Every point rating locates one image on a stable five-level scale and immediately yields a bounded crawler reward.
+- Every retained comparison teaches a direction in feature space; swapping left and right negates the difference and exposes historical position bias.
+- Both likelihoods share one utility, so either label type can improve predictions for unseen images without converting one into fake examples of the other.
 
-The target question should stay stable: **“Which photograph would I rather keep in my collection?”** Mixing “technically best,” “most important,” “most original,” and “my favorite” within the same label makes the latent utility ill-defined. Technical validity is therefore a hard pre-model gate, while personal choice is the learned objective.
+The target question should stay stable: **“How strongly would I want this photograph in my collection?”** The five anchors need a durable meaning—1 strongly reject, 2 weak, 3 worthwhile, 4 excellent, 5 exceptional—because shifting the interpretation between sessions makes the thresholds ill-defined. Technical validity is a hard pre-model gate, while personal judgment is the learned objective.
 
 One scalar utility assumes preferences are mostly transitive and context independent. Real aesthetic judgments can be cyclic, category dependent, and session dependent; the system should measure those violations rather than immediately fit a more expressive model. Only add context, multiple latent utilities, or time-varying parameters if held-out residuals show a repeatable pattern and there are enough labels to estimate it.
 
-## 2. Bradley–Terry, Thurstone, and Elo
+## 2. Ordinal ratings, Bradley–Terry, and Elo
 
-### Bradley–Terry and Thurstone–Mosteller
+### Why retain the pairwise likelihood
 
 The classical [Bradley–Terry model](https://academic.oup.com/biomet/article-abstract/39/3-4/324/326091) uses logistic random utility; the earlier [Thurstone law of comparative judgment](https://doi.org/10.1037/h0070288) leads, under its common equal-variance case, to a probit link. Both turn latent score differences into pairwise probabilities. Their practical behavior is usually similar at this scale; logistic loss is simpler, stable, and already supported by standard local ML tooling, so Bradley–Terry is the default. A probit challenger is worthwhile only if validation log loss or calibration improves.
 
-If the UI later collects explicit ties, do not convert them randomly into wins. Use a tie-aware likelihood such as [Davidson's extension](https://doi.org/10.1080/01621459.1970.10481082). A skip means “no usable label,” not a tie.
+If pairwise audits later collect explicit ties, do not convert them randomly into wins. Use a tie-aware likelihood such as [Davidson's extension](https://doi.org/10.1080/01621459.1970.10481082). A skip in the current rating UI means “no usable label,” not a middle score and not a zero reward.
 
 ### Two distinct rankings
 
-There are two related but different estimands:
+There are three related but different values:
 
-- **Collection rank:** how the already-labeled images compare, estimated from item identities and their comparison graph.
-- **Predictive taste:** how likely the user is to prefer a new image, estimated from visual features.
+- **Direct rating:** the owner's observed 1–5 judgment of an image; this is the authoritative new label and crawler reward source.
+- **Legacy Elo:** an online summary of immutable historical comparisons, retained for continuity rather than silently translated into point scores.
+- **Predictive utility:** the shared visual model's estimate for a new or rated image, used for pre-screening and evaluation but never as policy reward.
 
-They should not be conflated. A feature model can smooth away an idiosyncratic favorite, while an item-only model cannot score unseen candidates. The long-run canonical collection rank should therefore be a regularized batch Bradley–Terry fit over item parameters; the crawler and pair selector should use the feature model. The shipped v1 deliberately displays live Elo, as requested, and retains every comparison so that batch refitting can be introduced once the graph has enough coverage to make it meaningful.
+They should not be conflated. A feature model can smooth away an idiosyncratic favorite, a five-level score creates real ties, and Elo only compares the historical graph. The collection therefore leads with the observed point rating and preserves Elo for legacy evidence; predicted utility can break analytical ties only when clearly labeled as a prediction.
 
 ### Elo's proper role
 
-Elo updates a displayed rating immediately after each choice, making it excellent UI feedback. It is also an online approximation related to Bradley–Terry optimization, but its result depends on presentation order, initial ratings, and the K-factor; recent analysis explicitly studies Elo as online learning under model misspecification ([Tang, Wang & Jin, 2025](https://arxiv.org/abs/2502.10985)). Keep Elo as a live estimate, store every comparison immutably, and rebuild canonical scores from the entire graph.
+Elo updated immediately after every old pairwise choice and remains useful historical UI context. It is an online approximation related to Bradley–Terry optimization, but its result depends on presentation order, initial ratings, and the K-factor; recent analysis explicitly studies Elo as online learning under model misspecification ([Tang, Wang & Jin, 2025](https://arxiv.org/abs/2502.10985)). Keep Elo and every comparison immutable, but do not update Elo from a point rating or treat Elo as that rating.
 
-No item ranking is trustworthy across disconnected comparison components. Pair selection must schedule bridge comparisons, under-compared images, and occasional anchor comparisons so the graph stays connected. Regularization stabilizes sparse items but does not manufacture missing evidence.
+No legacy Elo ranking is trustworthy across disconnected comparison components. The new absolute scale avoids that graph-connectivity requirement for newly rated images, although occasional pairwise audits could still diagnose coarse ties and rating drift later.
 
 ## 3. Encoder review
 
-No available benchmark answers “which frozen encoder best predicts one person's taste in high-quality photography from hundreds of comparisons.” Published transfer results are informative priors, not a substitute for this project's image-disjoint evaluation.
+No available benchmark answers “which frozen encoder best predicts one person's taste in high-quality photography from hundreds of personal judgments.” Published transfer results are informative priors, not a substitute for this project's image-disjoint evaluation.
 
 | Encoder | Relevant evidence | Strengths for this project | Risks and decision |
 |---|---|---|---|
@@ -91,46 +109,48 @@ The personalized literature supports adaptation from a shared visual representat
 - [Lee & Kim, *Image Aesthetic Assessment Based on Pairwise Comparison*](https://openaccess.thecvf.com/content_ICCV_2019/html/Lee_Image_Aesthetic_Assessment_Based_on_Pairwise_Comparison__A_Unified_ICCV_2019_paper.html) show that pairwise comparison can support score regression and personalization through reference images.
 - [Yang et al., PARA](https://openaccess.thecvf.com/content/CVPR2022/html/Yang_Personalized_Image_Aesthetics_Assessment_With_Rich_Attributes_CVPR_2022_paper.html) collect 31,220 images and 438 subjects and show that both image and subject attributes matter, reinforcing that population taste is not a universal ground truth.
 - [Kim et al., 2026](https://openaccess.thecvf.com/content/CVPR2026/html/Kim_Learning_Personalized_Photographic_Style_from_Pairwise_User_Preferences_CVPR_2026_paper.html) study pairwise photographic-style preferences from many users, but their task compares style variants rather than choosing among arbitrary photographs. It is evidence for the efficiency of comparative feedback, not a directly deployable ranking model here.
+- [Cao, Mirjalili & Raschka](https://arxiv.org/abs/1901.07884) show how shared-weight cumulative binary tasks and ordered biases produce rank-consistent ordinal predictions; CORAL provides the appropriate small-head loss for the new 1–5 observations.
+- A 2026 matched study of expert judgments on Chinese paintings reports that preferences produced more consistent ordinal rankings while ratings anchored an absolute score scale ([Zhao et al., 2026](https://arxiv.org/abs/2605.19776)). Its domain and annotator regime differ from Lumen, but the complementary observation supports retaining both real streams in one utility model rather than manufacturing one label type from the other.
 
-Those systems often exploit many users, absolute ratings, or a generic population prior. This project has one user and wants the personal signal to remain sovereign. The safest low-data transfer is therefore a frozen general representation plus a small personal head. A generic aesthetics score may rank the unlabeled intake queue or reject the worst tail, but it should be logged as a separate feature and ablated during evaluation.
+Those systems often exploit many users or a generic population prior. This project has one user and wants the personal signal to remain sovereign. The safest low-data transfer is therefore a frozen general representation plus one small personal utility head. A generic aesthetics score may reject the worst intake tail, but it must be logged separately, ablated during evaluation, and never treated as a personal label or source-policy reward.
 
-## 5. Label efficiency and active preference learning
+## 5. Label efficiency with single-image ratings
 
-Random pairs waste labels when images are obviously different; pure uncertainty sampling also wastes labels by repeatedly asking genuine near-ties or out-of-distribution pairs. The acquisition policy needs information, coverage, and diversity.
+The full-screen 1–5 interface reduces the cognitive and display cost of comparing two high-resolution photographs and gives each crawled image an immediately attributable reward. The tradeoff is scale drift, coarser ties, and inconsistent use of the middle categories. Fixed verbal anchors, short sessions, occasional repeated images, and a broad intake distribution matter more than making the model clever early.
 
-[Maystre & Grossglauser](https://proceedings.mlr.press/v70/maystre17a.html) show that repeated sorting is a simple, effective active strategy under noisy Bradley–Terry preferences. [Feature-aware BTL theory](https://proceedings.mlr.press/v244/saha24a.html) shows why item features can reduce the comparison burden relative to learning every item independently. [BALD](https://arxiv.org/abs/1112.5745) provides an information-theoretic distinction between predictive uncertainty and information about model parameters, while [batch active preference learning](https://proceedings.mlr.press/v87/biyik18a.html) motivates removing redundant queries from a batch.
+Legacy pairwise evidence is still statistically useful. [Maystre & Grossglauser](https://proceedings.mlr.press/v70/maystre17a.html) show that repeated sorting is effective under noisy Bradley–Terry preferences, and [feature-aware BTL theory](https://proceedings.mlr.press/v244/saha24a.html) explains how visual features reduce the comparison burden. The current product nevertheless optimizes new labeling throughput with point ratings; pairwise queries are a possible future audit tool, not a second mandatory workflow.
 
 ### Recommended labeling phases
 
-**Cold start: first 100–200 choices**
+**Cold start: first 50 ratings**
 
 - Seed a deliberately broad pool across subject, color, monochrome, weather, scale, orientation, photographic era, and source—not only known favorites.
-- Use repeated noisy sorting, under-compared images, and graph-bridging pairs; do not let an unvalidated model control the session.
-- Randomize left/right placement. Make roughly 5–10% of trials hidden repeats, usually with sides reversed, to estimate consistency and position bias.
-- Include a few easy anchor comparisons among difficult pairs. They help detect fatigue and keep the graph calibrated.
+- Keep the five category meanings visible in onboarding and stable across sessions; do not reinterpret 3 as a skip.
+- Let EXP3 choose sources from the first crawl with an initially uniform distribution and explicit exploration, but do not let an unvalidated visual score narrow the intake.
+- Train every five ratings to expose progress and pipeline failures, while treating these early heads as smoke tests rather than reliable taste oracles.
 
-**Early model: roughly 200–1,000 choices**
+**Early model: roughly 50–500 ratings**
 
-- 50% near-tie predictive entropy, subject to diversity constraints.
-- 25% epistemic disagreement among bootstrapped heads.
-- 15% graph repair: under-compared images, disconnected regions, and stable anchors.
-- 10% random exploration from the rights- and quality-clean pool.
+- Preserve randomized source and candidate coverage even as predicted utility begins pre-screening.
+- Use bootstrap disagreement and distance from labeled embeddings to keep some unfamiliar candidates, not to invent rewards.
+- Consider a small hidden-repeat audit stream to estimate within-person agreement and threshold drift; it must be explicitly modeled because the shipped immutable rating path ordinarily labels each image once.
+- Measure discovery yield by eventual direct rating, not by the utility score that selected the image.
 
-These percentages are engineering starting points, not claims from a paper. Log the acquisition reason for every pair and ablate the mixture against random and repeated-sort baselines.
+These are engineering stages, not sample-complexity guarantees. Effective sample size depends on visual diversity and rating consistency; 100 varied ratings can teach more than 1,000 near-duplicates.
 
-**Maturing model: beyond roughly 1,000 choices**
+**Maturing model: beyond roughly 500 ratings**
 
-- Adapt the mixture using held-out learning curves and online discovery yield.
+- Adapt pre-screening and exploration using image-disjoint learning curves and online human-rated discovery yield.
 - Add source-, photographer-, and embedding-cluster quotas to prevent the model from narrowing the visual world to its early guesses.
-- Revisit old top images against new high-potential candidates, but cap repeats so already popular items do not consume the labeling budget.
+- If five-level ties hide meaningful top-order differences, run a small optional pairwise audit among highly rated images and feed those real comparisons to the same utility head.
 
-Skips create no preference label. Exact duplicates and obvious near-duplicates should never be compared. If the user repeatedly cannot choose between genuinely distinct images, add an explicit tie control and fit the tie model rather than forcing noise into binary outcomes.
+Skips create no rating, no model label, and no bandit reward. Exact duplicates and obvious near-duplicates should not consume labeling capacity. Missing feedback must remain missing: converting a skip or an unrated imported image to zero would train the crawler to punish latency rather than image quality.
 
 ## 6. Uncertainty, diversity, and discovery
 
-For a pair probability near 0.5, predictive entropy is high, but that can mean either **aleatoric uncertainty** (the user genuinely sees a near-tie) or **epistemic uncertainty** (the model lacks evidence). Only the latter is reliably reduced by more labels.
+For an ordinal prediction spread across adjacent categories, entropy can reflect either **aleatoric uncertainty** (the user genuinely wavers between ratings) or **epistemic uncertainty** (the model lacks evidence). Only the latter is reliably reduced by more labels. Legacy pair probabilities near 0.5 have the same ambiguity.
 
-For the linear head, uncertainty need not require a large neural network. Practical choices are Bayesian logistic regression, a Laplace approximation, or 5–10 L2-regularized heads trained on bootstrap resamples and different seeds. Deep ensembles are a well-supported general uncertainty baseline ([Lakshminarayanan, Pritzel & Blundell](https://proceedings.neurips.cc/paper_files/paper/2017/hash/9ef2ed4b7fd2c810847ffa5fa85bce38-Abstract.html)), but here the ensemble members should remain small and cheap.
+For the linear head, uncertainty need not require a large neural network. Lumen uses deterministic bootstrap replicas of the same joint ordinal-plus-pairwise head; the replicas are uncertainty samples from one architecture, not separately purposed taste and reward models. Deep ensembles are a well-supported general uncertainty baseline ([Lakshminarayanan, Pritzel & Blundell](https://proceedings.neurips.cc/paper_files/paper/2017/hash/9ef2ed4b7fd2c810847ffa5fa85bce38-Abstract.html)), but here every member remains small and cheap.
 
 For unseen candidate \(x\), maintain ensemble mean \(\mu(x)\) and standard deviation \(\sigma(x)\). A useful acquisition score is an upper-confidence rule
 
@@ -138,32 +158,32 @@ For unseen candidate \(x\), maintain ensemble mean \(\mu(x)\) and standard devia
 a(x)=\mu(x)+\beta\sigma(x)+\gamma q(x),
 \]
 
-where \(q(x)\) is a separate, bounded generic-quality prior. The queue then applies a diversity penalty such as maximal marginal relevance, subtracting similarity to already-selected candidates. Alternatives such as Thompson sampling are attractive because they naturally vary exploration without assigning every uncertain image an unrealistically high permanent score.
+where \(q(x)\) is a separate, bounded generic-quality prior. The queue then applies a diversity penalty such as maximal marginal relevance, subtracting similarity to already-selected candidates. This score can decide which valid image is worth showing; it is never written to the source controller as reward. That separation avoids the reward-model overoptimization failure in which optimization exploits predictor error rather than improving true human value ([Gao et al., 2023](https://proceedings.mlr.press/v202/gao23h.html)).
 
 Uncertainty must be paired with out-of-distribution checks. A candidate far from the labeled embedding support can receive an extreme score for the wrong reason. Record nearest-neighbor distance and source/category novelty, cap model confidence outside supported regions, and route some of those items through the explicit exploration quota.
 
-The discovery metric is not “predicted Elo.” Unseen images have no Elo. The model proposes high-utility candidates; the user then compares them, and only judged images enter the collection ranking.
+The discovery metric is not predicted Elo or predicted utility. The model proposes candidates; the user rates them; only that observed rating measures discovery quality and updates the source policy.
 
 ## 7. Training schedule and promotion gates
 
-Training after 20 choices is useful as an end-to-end smoke test, not evidence that the model is ready to drive discovery. Model-guided acquisition should begin only after the comparison graph is connected enough and a frozen-head baseline beats chance on held-out data with useful calibration.
+The scheduler retrains after every five ratings through 50 and every 10 ratings thereafter. The five-rating run is a pipeline-validating candidate fit; at 10 ratings, five older images can train the head while the latest five form the first fresh image-disjoint promotion holdout, and after a promotion every subsequent five-rating batch can be evaluated without reusing labels seen by the incumbent. Legacy comparisons retain the earlier cadence: every 20 through 100, then every 50. Either stream becoming due launches one joint run over both streams, pinned to both immutable cutoffs so retries are idempotent. Frequent early runs make progress visible; they do not imply that a five-label model is trustworthy enough to dominate candidate selection.
 
 ### Staged capacity
 
-1. **Baseline:** frozen OpenCLIP ViT-B/32, normalized embedding, L2-regularized zero-bias linear Bradley–Terry head.
+1. **Baseline:** frozen OpenCLIP ViT-B/32, normalized embedding, one L2-regularized scalar utility with CORAL thresholds and a Bradley–Terry legacy term.
 2. **Encoder bake-off:** on a fixed split, compare OpenCLIP, DINOv2, and SigLIP/SigLIP 2 with identical head capacity and tuning budget.
-3. **Head bake-off:** after about 500–1,000 diverse labels, compare the linear head with a very small two-layer head, interaction features, and the uncertainty ensemble.
-4. **Representation adaptation:** only after several thousand diverse comparisons, test last-block tuning or a parameter-efficient adapter such as [LoRA](https://openreview.net/forum?id=nZeVKeeFYf9). Do not jump directly to full encoder fine-tuning.
+3. **Head bake-off:** after about 500–1,000 diverse total labels, compare the linear head with a very small two-layer head and the deterministic bootstrap ensemble under identical joint losses.
+4. **Representation adaptation:** only after several thousand diverse ratings and comparisons, test last-block tuning or a parameter-efficient adapter such as [LoRA](https://openreview.net/forum?id=nZeVKeeFYf9). Do not jump directly to full encoder fine-tuning.
 
-Label count alone is not a gate: thousands of repetitive comparisons from one visual cluster have low effective sample size. Promote a more complex model only when all of the following hold:
+Label count alone is not a gate: thousands of repetitive ratings or comparisons from one visual cluster have low effective sample size. Promote a more complex model only when all of the following hold:
 
-- lower image-disjoint validation log loss with a bootstrap confidence interval that excludes no improvement;
-- no material regression in source/photographer holdouts, calibration, or hidden-repeat behavior;
+- lower image-disjoint ordinal loss/MAE and legacy pairwise log loss with bootstrap confidence intervals that exclude no improvement;
+- no material regression in source/photographer holdouts, ordinal calibration, or hidden-repeat behavior;
 - gains persist across at least three data splits or temporal folds and random seeds;
 - hyperparameters were chosen without touching the final test set;
 - hosted CPU embedding/training latency, transfer, and artifact size stay within the product budget.
 
-Every artifact should store the comparison cutoff, split IDs, encoder and weight hash, preprocessing manifest, random seed, hyperparameters, source commit, and metrics. Retraining should create immutable versioned artifacts and switch the active model only after gates pass, so rollback is exact.
+Every artifact should store both rating and comparison cutoffs and counts, split IDs, encoder and weight hash, preprocessing manifest, random seed, hyperparameters, source commit, and per-stream metrics. Retraining should create immutable versioned artifacts and switch the active model only after gates pass, so rollback is exact.
 
 ## 8. Acquisition and crawler design
 
@@ -172,8 +192,8 @@ The crawler is a staged acquisition system, not a general-purpose web scraper:
 ```text
 provider API -> rights/provenance gate -> download/decode -> technical-quality gate
              -> exact/perceptual dedupe -> embedding + weak quality prior
-             -> taste UCB -> diversity/source quotas -> comparison queue
-             -> user choices -> retraining -> improved acquisition
+             -> optional taste pre-screen + diversity quotas -> one-photo queue
+             -> direct 1–5 rating -> source reward + joint retraining
 ```
 
 ### Provider contract
@@ -202,17 +222,17 @@ Resolution is necessary but not sufficient. Blur, low contrast, darkness, grain,
 
 Source metadata and text-aligned embeddings can expand queries from the user's seeds: National Geographic-style documentary landscape, classic large-format monochrome, award-winning landscape, wildlife, night sky, aerial, desert, mountain, forest, ocean, and so on. LLM agents may propose source queries, categories, and photographer names, then audit coverage. They should not fetch arbitrary image-search results or write unverified files directly into the collection.
 
-The scheduler should maintain explicit budgets for exploitation, uncertainty, random exploration, new sources, underrepresented embedding clusters, and underrepresented creators. Without those budgets, a taste model trained on its own selected data creates a feedback loop: it sees more of what it already understands, becomes more confident there, and mistakes narrowness for taste.
+The scheduler should maintain explicit budgets for exploitation, uncertainty, random exploration, new sources, underrepresented embedding clusters, and underrepresented creators. Without those budgets, a taste model used for pre-screening creates a feedback loop: it sees more of what it already understands, becomes more confident there, and mistakes narrowness for taste. Direct human reward prevents prediction from certifying its own choices, but it does not by itself fix selective exposure.
 
-## 9. Source-selection bandit: the implemented RL system
+## 9. Direct-reward source controller
 
-The crawler's first learned controller is intentionally a **multi-armed bandit**, the one-step edge of reinforcement learning, rather than a deep RL agent. Each arm is a rights-clean Wikimedia source category; an action chooses which category's next API page to inspect; and only that page's result is observed. Advancing an opaque continuation token is persistent state, but the present action does not yet expose a learnable, validated long-horizon transition model. Calling this an MDP and fitting a deep policy would add unsupported credit assignment rather than useful intelligence.
+The crawler's controller is intentionally a **context-free multi-armed bandit**, not a second vision model and not deep reinforcement learning. Each arm is a rights-clean Wikimedia source category; an action chooses which category's next API page to inspect; and only the eventual outcome of that action is observed. Advancing an opaque continuation token is persistent operational state, but the policy does not consume state features or optimize a validated long-horizon return. Calling the shipped controller contextual RL would overstate what it learns.
 
-This separation is important: the personal Bradley–Terry vision model estimates image utility, while the crawler bandit learns **where that model tends to find unusually strong candidates**. Neither source metadata nor bandit reward is turned into a preference label. Rights, decode, resolution, byte, corruption, and deduplication checks remain hard gates outside the learned policy, so reward optimization cannot trade them away.
+The controller learns only **which source categories yield highly rated imported images**. The shared ordinal-plus-pairwise vision head can rank technically valid candidates within a fetched pool to conserve labeling attention, but its score never becomes action reward. Rights, decode, resolution, byte, corruption, and deduplication checks remain hard gates outside the policy, so reward optimization cannot trade them away.
 
 ### Why discounted EXP3-IX is the current choice
 
-The source problem has a small discrete action set, bandit-only feedback, very few daily actions, changing provider contents, and a reward model that changes as the owner labels more images. These properties favor a small adversarial bandit over a high-capacity stochastic controller. EXP3 supplies the exponential-weights foundation for non-stochastic rewards ([Auer et al., 2002](https://www.schapire.net/papers/AuerCeFrSc01.pdf)); EXP3-IX stabilizes importance-weighted feedback through implicit exploration ([Neu, 2015](https://proceedings.neurips.cc/paper/2015/hash/e5a4d6bf330f23a8707bb0d6001dfbe8-Abstract.html)); and discounting is a standard way to emphasize recent evidence when bandit rewards change ([Garivier & Moulines, 2011](https://arxiv.org/abs/0805.3415)). The shipped policy is an engineering combination of those ideas, not a claim that their individual regret theorems apply unchanged to this proxy-reward crawler.
+The source problem has a small discrete action set, bandit-only feedback, very few daily actions, changing provider contents, and delayed human ratings. These properties favor a small adversarial bandit over a high-capacity stochastic controller. EXP3 supplies the exponential-weights foundation for non-stochastic rewards ([Auer et al., 2002](https://www.schapire.net/papers/AuerCeFrSc01.pdf)); EXP3-IX stabilizes importance-weighted feedback through implicit exploration ([Neu, 2015](https://proceedings.neurips.cc/paper/2015/hash/e5a4d6bf330f23a8707bb0d6001dfbe8-Abstract.html)); and discounting emphasizes recent evidence as taste, category contents, and intake filters drift ([Garivier & Moulines, 2011](https://arxiv.org/abs/0805.3415)). The shipped discounted EXP3-IX policy is an engineering combination of those ideas, not a claim that their regret theorems transfer unchanged to this delayed, non-stationary product loop.
 
 For available categories \(A_t\), the worker replays at most 4,096 completed observations. Before each replayed observation it discounts every log weight by \(0.995\). With
 
@@ -228,42 +248,36 @@ p_t(a)=0.8\,\frac{\exp(w_a)}{\sum_{j\in A_t}\exp(w_j)}
        +\frac{0.2}{|A_t|}.
 \]
 
-The explicit 20% mixture is deliberately retained even though IX already regularizes the estimator: it guarantees continuing source coverage, bounds every available arm away from zero, and creates overlap for later counterfactual evaluation. Exhausted categories are removed from that round's available set and probabilities are renormalized over the rest.
+The explicit 20% mixture is deliberately retained even though IX already regularizes the estimator: it guarantees continuing source coverage, bounds every available arm away from zero, and creates overlap for later counterfactual evaluation. The first crawl therefore begins uniformly without waiting for any vision model. Exhausted categories are removed from that round's available set and probabilities are renormalized over the rest.
 
-### Extreme, anchor-relative reward
+### Direct, attributable reward
 
-The product objective is not to find the source with the best *average* photograph; it is to discover exceptional photographs. The max-K-armed or “extreme bandit” literature formalizes objectives based on the best sampled reward ([Cicirello & Smith, 2005](https://www.cicirello.org/publications/cicirello2005aaai.html)), but also shows that universal extreme-regret guarantees are impossible without tail and oracle assumptions ([Nishihara, Lopez-Paz & Bottou, 2016](https://proceedings.mlr.press/v51/nishihara16.html)). Lumen therefore uses the maximum eligible reward on a fully evaluated fetched page as a transparent product-aligned objective, not as a theorem-backed optimal extreme-bandit algorithm. An observed page with no eligible candidates receives zero; only a page genuinely truncated by a pool or download cap is marked censored and excluded from policy learning. Deterministic top-k non-selection is not censoring, which avoids learning only from the candidates that survived selection.
-
-The proxy reward is relative to the owner's strongest sufficiently judged images, not a raw utility whose scale changes arbitrarily between training runs. A promoted model becomes eligible at 40 comparisons, and activation additionally requires at least four live anchor images with three or more human matches each. The worker takes up to eight highest-Elo qualifying anchors and the eight pair-group-bootstrap preference heads persisted with the model. For an imported candidate \(x\) and ensemble member \(b\),
+Each source action may import at most one photograph, giving exact credit assignment between an arm choice and a later human judgment. If that photograph receives rating \(r\in\{1,2,3,4,5\}\), the controller observes
 
 \[
-q_b(x)=\frac{1}{M}\sum_{m=1}^{M}
-\sigma\!\left(s_b(x)-s_b(a_m)\right),\qquad
-r_{\text{proxy}}(x)=Q_{0.10}\{q_b(x)\}_{b=1}^{8}.
+r_{\mathrm{human}}=\frac{r-1}{4}\in\{0,0.25,0.5,0.75,1\}.
 \]
 
-Thus the score means “a pessimistic estimate of the probability that this candidate beats a random current top anchor.” An action's reward is the maximum score among all of that action's technically eligible, deduplicated candidates, whether or not the final bounded batch imports that candidate. Taking the bootstrap ensemble's 10th percentile reduces the chance that one unstable low-data fit sends the crawler toward an unsupported region; ensemble uncertainty is a practical, well-tested predictive-uncertainty baseline ([Lakshminarayanan, Pritzel & Blundell, 2017](https://proceedings.neurips.cc/paper_files/paper/2017/hash/9ef2ed4b7fd2c810847ffa5fa85bce38-Abstract.html)). The quantile and anchor ladder remain engineering choices to validate against eventual human discovery yield.
+The mapping preserves the ordering and endpoints of the owner's scale without claiming equal psychological distance between categories; EXP3 only needs a bounded numerical reward. A fully evaluated source action that finds no importable image receives zero because it consumed the opportunity and produced no item. An action with an imported but unrated image remains pending, not zero. A skip likewise remains missing. A genuinely truncated/censored fetch and an operational failure are logged but excluded from reward replay because their outcomes were not fully observed.
 
-### Delayed human correction
+Attribution is deliberately narrower than maximizing a predicted score over a whole page. One action, one imported image, and one immutable rating make the reward understandable and auditable. The cost is slower policy feedback and lower crawl throughput, an appropriate trade for a single user whose attention—not API volume—is the scarce resource.
 
-Proxy reward lets the source policy learn before a newly found image has enough comparisons, but the user's later choices remain authoritative. Every imported candidate is linked to the source action that discovered it. Below three matches the action retains its proxy reward. From three through eight matches, the worker blends the proxy with the candidate's expected Elo win probability against the current anchor ladder using confidence \(c=\min(1,m/8)\):
+### Delayed human feedback
 
-\[
-r_{\text{effective}}=(1-c)r_{\text{proxy}}+c\,r_{\text{human}}.
-\]
+The selected source action is recorded immediately, but its imported image may be rated hours or days later. The rating transaction atomically links the normalized reward back to that action; the next policy replay incorporates it. No provisional model score is filled in while the action waits, and no later Elo, anchor comparison, or generic aesthetic score replaces the direct observation. Delayed bandit feedback is a distinct statistical problem ([Joulani, György & Szepesvári, 2013](https://proceedings.mlr.press/v28/joulani13.html)), so policy learning curves must be indexed by observed rewards rather than merely actions launched.
 
-At eight matches the human-relative reward fully replaces the proxy. Human correction occurs only if the exact maximum-proxy candidate entered the collection; a non-imported reward winner keeps its proxy instead of borrowing feedback from a different image. When correction is possible, only that image's later Elo is used, and it is compared with the action's stored anchor identities using their contemporaneous Elo values. This keeps proxy and human feedback on one estimand instead of silently switching images or anchor cohorts. These delayed corrections are refreshed before the next crawl and the bounded policy history is replayed; no synthetic pairwise labels are created. Delayed bandit feedback is a distinct statistical problem ([Joulani, György & Szepesvári, 2013](https://proceedings.mlr.press/v28/joulani13.html)), so this progressive replacement should be evaluated empirically rather than described as a direct implementation of that paper's delay model.
+Policy versions partition incompatible reward definitions. Historical rows created by the retired model-scored scheme remain audit data but do not enter direct-rating policy replay; otherwise the controller would combine quantities with different meanings and manufacture apparent sample size.
 
 ### Exact logging, exploration, and off-policy evaluation
 
-Every source action durably records the selected arm, its exact behavior propensity, the complete probability map over the then-available arms, policy version, model-run ID, anchor IDs, action index, outcome status, candidate counts, proxy reward, later human reward, and effective reward. Failed and censored actions are retained for audit but excluded from reward replay. This makes the behavior policy reconstructible and, because every available category has positive probability, provides the support needed for inverse-propensity, self-normalized, or doubly robust evaluation. Propensity logging is necessary but not sufficient: offline estimates still need adequate overlap, controlled variance, and a fixed reward definition ([Li et al., 2011](https://arxiv.org/abs/1003.5956); [Dudík, Langford & Li, 2011](https://arxiv.org/abs/1103.4601); [Wang, Agarwal & Dudík, 2017](https://proceedings.mlr.press/v70/wang17a.html)).
+Every source action durably records the selected arm, its exact behavior propensity, the complete probability map over the then-available arms, policy version, optional model-run ID used for pre-screening, action index, outcome status, candidate counts, the one imported image ID, and its eventual direct human/effective reward. Failed, censored, and still-pending actions are retained for audit but excluded from reward replay. This makes the behavior policy reconstructible and, because every available category has positive probability, provides the support needed for inverse-propensity, self-normalized, or doubly robust evaluation. Propensity logging is necessary but not sufficient: offline estimates still need adequate overlap, controlled variance, and one fixed reward definition ([Li et al., 2011](https://arxiv.org/abs/1003.5956); [Dudík, Langford & Li, 2011](https://arxiv.org/abs/1103.4601); [Wang, Agarwal & Dudík, 2017](https://proceedings.mlr.press/v70/wang17a.html)).
 
-No off-policy estimator is promoted automatically yet. With this single user's small stream, policy comparisons must wait for useful effective sample size, be stratified by reward-model version, report clipped-weight sensitivity and confidence intervals, and ultimately use mature human-corrected discovery outcomes. The source logs support that future evaluation; they do not make a handful of actions conclusive.
+No off-policy estimator is promoted automatically yet. With this single user's small stream, policy comparisons must wait for useful effective sample size, remain within the direct-reward policy version, report clipped-weight sensitivity and confidence intervals, and use observed human ratings. The source logs support that future evaluation; they do not make a handful of actions conclusive.
 
 Source exploration and candidate exploration are separate controls:
 
 - **20% source exploration** is truly randomized and propensity-logged in the behavior distribution above.
-- **20% candidate exploration** reserves at least one slot in each model-guided import batch and chooses it by a reproducible daily hash from candidates outside the taste-ranked exploitation prefix. This protects diversity, but it is not a randomized, propensity-logged candidate policy and therefore is not yet suitable for candidate-level off-policy claims.
+- **Candidate exploration** preserves some candidates outside the visual model's top pre-screened prefix. Unless its exact probability is logged, it protects diversity but does not support candidate-level off-policy claims.
 
 ### Why not PPO, DQN, or NeuralUCB yet
 
@@ -272,37 +286,38 @@ Source exploration and candidate exploration are separate controls:
 | **PPO** | An on-policy policy-gradient method that alternates environment sampling with multiple epochs on a clipped surrogate objective ([Schulman et al., 2017](https://arxiv.org/abs/1707.06347)). | Five imports per day cannot supply the volume of on-policy trajectories a neural policy needs, and the present crawl has no validated long-horizon return for PPO to optimize. |
 | **DQN** | Value learning from replayed transitions in an MDP, demonstrated at scale on Atari frames and game rewards ([Mnih et al., 2015](https://www.nature.com/articles/nature14236)). | Lumen currently observes one source page's bandit reward, not dense reusable state-transition experience; bootstrapped Q-values would add severe sample and representation error. |
 | **NeuralUCB** | A neural contextual bandit with UCB exploration under a bounded stochastic reward-function setup ([Zhou, Li & Gu, 2020](https://proceedings.mlr.press/v119/zhou20a.html)). | It becomes attractive when thousands of changing links can share stable context features, but today there are few named category arms, little feedback, and non-stationarity from both taste-model updates and moving provider contents. |
-| **Discounted EXP3-IX** | Small adversarial bandit with implicit importance regularization, explicit coverage, and recency weighting. | It matches the data actually available, is cheap enough to replay exactly, exposes every action probability, and can be replaced only after logged evidence supports a richer policy. |
+| **Discounted EXP3-IX** | Context-free adversarial source bandit with implicit importance regularization, explicit coverage, and recency weighting. | It matches the sparse direct ratings actually available, is cheap enough to replay exactly, exposes every action probability, and can be replaced only after logged evidence supports a richer policy. |
 
 ### Future: sleeping, contextual link-frontier learning
 
 The next justified expansion is not immediately deep RL; it is a **sleeping contextual bandit** over frontier links. Individual categories, providers, searches, and links appear, expire, exhaust, or become temporarily unavailable—precisely the changing-action-set setting studied by sleeping bandits ([Kanade, McMahan & Bryan, 2009](https://proceedings.mlr.press/v5/kanade09a.html); [Saha, Gaillard & Valko, 2020](https://proceedings.mlr.press/v119/saha20a.html)). Each available link should carry pre-fetch context such as provider and category, frontier depth, rights confidence, text/CLIP query embedding, creator novelty, recent domain yield, estimated bytes, and request cost. A linear contextual policy should be the first challenger; NeuralUCB is warranted only if nonlinear held-out gains justify its capacity.
 
-That frontier must log the full available action set, feature version, selected-link propensity, fetch cost, continuation mutation, censoring, and delayed image outcomes. Offline IPS/SNIPS/DR estimates and a shadow replay should beat discounted EXP3-IX on mature human discovery yield before promotion. Only if link choices demonstrably change valuable future reachable states—and enough complete trajectories exist to learn that effect—should the crawler be upgraded from a contextual bandit to an MDP and benchmark PPO, DQN, or a graph-specific RL method.
+That frontier must log the full available action set, feature version, selected-link propensity, fetch cost, continuation mutation, censoring, and delayed direct ratings. Offline IPS/SNIPS/DR estimates and a shadow replay should beat discounted EXP3-IX on human-rated discovery yield before promotion. Only if link choices demonstrably change valuable future reachable states—and enough complete trajectories exist to learn that effect—should the crawler be upgraded from a contextual bandit to an MDP and benchmark PPO, DQN, or a graph-specific RL method.
 
 ## 10. Evaluation and leakage control
 
 ### Three questions require three splits
 
-1. **Future choices on known images:** a rolling chronological comparison holdout may contain images seen earlier. This measures online stability and changing judgment, but not generalization to new photographs.
-2. **Taste prediction for new images:** an image-disjoint split must keep every image—and every comparison incident to it—out of training. This requires planning evaluation pools prospectively; randomly splitting edges is not image-disjoint.
+1. **Future judgments on known images:** a rolling chronological or deliberately repeated-rating holdout may contain images seen earlier. This measures within-person stability and threshold drift, but not generalization to new photographs.
+2. **Taste prediction for new images:** an image-disjoint split must keep every image, its rating, and every comparison incident to it out of training. This requires planning evaluation pools prospectively; randomly splitting rows or comparison edges is not image-disjoint.
 3. **Discovery beyond familiar sources:** source-, photographer-, and near-duplicate-cluster holdouts test whether the model learned visual taste rather than source identity or a photographer signature.
 
 Use validation folds for encoder, regularization, acquisition, and calibration choices, then evaluate once on the locked test set. Group bootstrap resampling by image cluster or labeling session rather than pretending comparison edges are independent.
 
 ### Metrics
 
-- **Primary predictive metrics:** pairwise log loss and accuracy on user labels.
-- **Probability quality:** Brier score, reliability diagram, and expected calibration error.
-- **Ranking quality:** Kendall or Spearman correlation against a sufficiently compared held-out item ranking, plus top-k regret or NDCG when the held-out graph supports it.
-- **Label efficiency:** learning curves versus number of comparisons, with random pairing and repeated sorting as baselines.
-- **Discovery yield:** fraction of proposed candidates that reach the collection's top decile after a minimum comparison count, median eventual percentile, labels per accepted top item, creator/source novelty, and embedding diversity.
-- **Human consistency:** hidden-repeat agreement, reversed-side agreement, skip rate, session-duration effects, and left/right bias. This is a noise ceiling, not a model score.
+- **Primary ordinal metrics:** cumulative log loss, mean absolute error, quadratic-weighted kappa, and per-threshold calibration on held-out ratings.
+- **Legacy pairwise metrics:** log loss, accuracy, Brier score, and reliability on retained comparisons.
+- **Ranking quality:** Spearman correlation and NDCG over sufficiently broad held-out ratings, with Kendall correlation against pairwise audit rankings when available.
+- **Label efficiency:** joint learning curves versus number and mixture of ratings/comparisons, including ratings-only and legacy-only ablations.
+- **Discovery yield:** mean direct normalized reward, fraction of proposed candidates rated 4 or 5, creator/source novelty, embedding diversity, delay-to-rating, and reward per crawl action.
+- **Human consistency:** repeated-rating agreement, threshold usage, skip rate, session-duration effects, and historical left/right bias. This is a noise ceiling, not a model score.
 
 ### Common leakage paths
 
 - the same photograph as a thumbnail, crop, recompression, monochrome conversion, or mirror across train and test;
 - a burst or near-identical series from one photographer across splits;
+- one image's rating in training while a comparison containing that image is in validation, or the reverse;
 - repeated comparisons of the same pair with only side order changed;
 - provider awards, popularity, favorites, captions, or photographer names passed into the taste head;
 - tuning encoder, preprocessing, or thresholds after inspecting the locked test set;
@@ -314,14 +329,14 @@ Deduplicate before splitting, keep metadata out of the personal visual head, mai
 
 | Decision | v1 choice | Reason | Revisit when |
 |---|---|---|---|
-| Personal objective | Feature-aware logistic Bradley–Terry | Directly matches pairwise labels and generalizes through image features. | Stable residual cycles or category-conditioned failures appear. |
+| Personal objective | One scalar utility with CORAL ordinal loss plus legacy Bradley–Terry loss | Learns from every real label without maintaining separate taste/reward models or synthesizing labels. | Per-stream ablations show negative transfer or stable category-conditioned failures. |
 | Encoder | Frozen OpenCLIP ViT-B/32 | Already integrated, CPU-feasible, reproducible, and a credible semantic baseline. | The controlled DINOv2/SigLIP bake-off has enough disjoint labels. |
-| Collection rank | Live Elo with immutable comparison history | Immediate feedback matches the product requirement; retained labels make a later item-only BT refit reproducible. | Add periodic BT only after graph coverage supports it; a Bayesian ranker may later add intervals. |
-| Cold start | Diverse editorial/open-access seeds and repeated sorting | Coverage matters more than premature model uncertainty. | Held-out performance and calibration justify active model control. |
-| Active queries | Entropy + ensemble disagreement + graph repair + exploration, then batch diversity | Balances learnability, connectivity, and novelty. | Logged ablations show a better allocation. |
+| Collection rank | Direct 1–5 rating first, historical Elo retained | Keeps observed evidence interpretable and preserves the existing comparison history. | Top-rating ties justify optional pairwise audits or a clearly labeled predictive tie-break. |
+| Cold start | Diverse editorial/open-access seeds plus uniform EXP3 source probabilities | Coverage matters more than premature model confidence; the source controller needs no model gate. | Direct reward history supports non-uniform source weights. |
+| Candidate selection | Utility/uncertainty pre-screen plus explicit exploration | Conserves attention while keeping predictive output outside the reward loop. | Logged random-audit ablations show a better allocation. |
 | Generic aesthetics | Soft intake prior only | Removes obvious low-value tail without overwriting personal taste. | Its incremental discovery yield is proven on random audits. |
 | Fine-tuning | Frozen encoder | Hundreds of labels cannot safely support millions of adapted weights. | Several thousand diverse labels and all promotion gates pass. |
-| Crawling | Rights-explicit adapters plus discounted EXP3-IX source selection | Preserves auditable licenses while learning which source category yields extreme anchor-relative reward. | Logged OPE supports a sleeping contextual link policy. |
+| Crawling | Rights-explicit adapters plus context-free discounted EXP3-IX | Learns source yield directly from `(rating - 1) / 4` with exact action propensities and no predicted reward. | Logged direct-reward OPE supports a sleeping contextual link policy. |
 
 ## 12. Rights-aware sourcing
 
@@ -348,6 +363,8 @@ For every displayed image, preserve creator, title, source link, license name/li
 - Thurstone, [*A Law of Comparative Judgment*](https://doi.org/10.1037/h0070288) (1927).
 - Bradley & Terry, [*Rank Analysis of Incomplete Block Designs: The Method of Paired Comparisons*](https://academic.oup.com/biomet/article-abstract/39/3-4/324/326091) (1952).
 - Davidson, [*On Extending the Bradley–Terry Model to Accommodate Ties*](https://doi.org/10.1080/01621459.1970.10481082) (1970).
+- Cao, Mirjalili & Raschka, [*Rank Consistent Ordinal Regression for Neural Networks with Application to Age Estimation*](https://arxiv.org/abs/1901.07884) (Pattern Recognition Letters, 2020).
+- Zhao et al., [*Preferences Order, Ratings Anchor: From Fused Expert Aesthetic Ground Truth to Self-Distillation*](https://arxiv.org/abs/2605.19776) (2026).
 - Maystre & Grossglauser, [*Just Sort It! A Simple and Effective Approach to Active Preference Learning*](https://proceedings.mlr.press/v70/maystre17a.html) (ICML 2017).
 - Saha & Rajkumar, [*A Graph Theoretic Approach for Preference Learning with Feature Information*](https://proceedings.mlr.press/v244/saha24a.html) (UAI 2024).
 - Tang, Wang & Jin, [*Is Elo Rating Reliable? A Study Under Model Misspecification*](https://arxiv.org/abs/2502.10985) (2025).
@@ -377,9 +394,8 @@ For every displayed image, preserve creator, title, source link, license name/li
 - Auer et al., [*The Nonstochastic Multiarmed Bandit Problem*](https://www.schapire.net/papers/AuerCeFrSc01.pdf) (SIAM Journal on Computing, 2002).
 - Neu, [*Explore No More: Improved High-Probability Regret Bounds for Non-Stochastic Bandits*](https://proceedings.neurips.cc/paper/2015/hash/e5a4d6bf330f23a8707bb0d6001dfbe8-Abstract.html) (NeurIPS 2015).
 - Garivier & Moulines, [*On Upper-Confidence Bound Policies for Non-Stationary Bandit Problems*](https://arxiv.org/abs/0805.3415) (ALT 2011).
-- Cicirello & Smith, [*The Max K-Armed Bandit: A New Model of Exploration Applied to Search Heuristic Selection*](https://www.cicirello.org/publications/cicirello2005aaai.html) (AAAI 2005).
-- Nishihara, Lopez-Paz & Bottou, [*No Regret Bound for Extreme Bandits*](https://proceedings.mlr.press/v51/nishihara16.html) (AISTATS 2016).
 - Joulani, György & Szepesvári, [*Online Learning under Delayed Feedback*](https://proceedings.mlr.press/v28/joulani13.html) (ICML 2013).
+- Gao et al., [*Scaling Laws for Reward Model Overoptimization*](https://proceedings.mlr.press/v202/gao23h.html) (ICML 2023).
 - Li et al., [*A Contextual-Bandit Approach to Personalized News Article Recommendation*](https://arxiv.org/abs/1003.0146) (WWW 2010).
 - Kanade, McMahan & Bryan, [*Sleeping Experts and Bandits with Stochastic Action Availability and Adversarial Rewards*](https://proceedings.mlr.press/v5/kanade09a.html) (AISTATS 2009).
 - Saha, Gaillard & Valko, [*Improved Sleeping Bandits with Stochastic Action Sets and Adversarial Rewards*](https://proceedings.mlr.press/v119/saha20a.html) (ICML 2020).

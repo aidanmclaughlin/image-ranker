@@ -18,7 +18,13 @@ import numpy as np
 from PIL import Image, UnidentifiedImageError
 
 from image_ranker.ingest import InvalidImage, validate_image
-from image_ranker.ml import PreferenceHead, _OpenClipRuntime, deserialize_embedding, serialize_embedding
+from image_ranker.ml import (
+    PreferenceHead,
+    _OpenClipRuntime,
+    deserialize_embedding,
+    serialize_embedding,
+    sigmoid,
+)
 from image_ranker.sources.wikimedia import (
     DEFAULT_CATEGORIES,
     EXT_METADATA_FIELDS,
@@ -35,12 +41,11 @@ from .blob_store import ImagePayload, prepare_image, upload_image
 from .bandit import (
     POLICY_DISCOUNT,
     POLICY_VERSION,
-    MIN_REWARD_MODEL_COMPARISONS,
+    MIN_TASTE_MODEL_FEEDBACK,
     SOURCE_EXPLORATION_FRACTION,
     BanditDecision,
     RewardContext,
     action_outcome,
-    anchor_relative_reward,
     choose_arm,
     exp3_ix_probabilities,
     finish_action,
@@ -242,10 +247,13 @@ def _frontier_pages(
         action_index += 1
         continuation = frontier["continuations"][category]
         try:
+            # One provider result per logged source choice gives each import a
+            # single causal action while retaining the provider continuation.
+            page_size = 1 if decision is not None else FRONTIER_PAGE_SIZE
             pages, next_token = page_loader(
                 category,
                 continuation,
-                min(FRONTIER_PAGE_SIZE, remaining),
+                min(page_size, remaining),
                 request_delay,
             )
         except BaseException:
@@ -530,21 +538,34 @@ def _select_candidates(
     user_id: str,
     head: PreferenceHead | None,
 ) -> list[Candidate]:
+    if allowance < 0:
+        raise ValueError("candidate allowance cannot be negative")
+    if allowance == 0:
+        return []
+    distinct: list[Candidate] = []
+    seen_actions: set[int] = set()
+    for candidate in candidates:
+        if candidate.action_id is not None:
+            if candidate.action_id in seen_actions:
+                continue
+            seen_actions.add(candidate.action_id)
+        distinct.append(candidate)
+
     if head is None:
-        selected = candidates[:allowance]
+        selected = distinct[:allowance]
         for candidate in selected:
             candidate.selection_mode = "curated"
         return selected
 
     exploration_count = min(
-        len(candidates), max(1, int(math.ceil(allowance * EXPLORATION_FRACTION)))
+        len(distinct), max(1, int(math.ceil(allowance * EXPLORATION_FRACTION)))
     )
-    exploitation_count = max(0, min(allowance, len(candidates)) - exploration_count)
-    exploitation = candidates[:exploitation_count]
+    exploitation_count = max(0, min(allowance, len(distinct)) - exploration_count)
+    exploitation = distinct[:exploitation_count]
     for candidate in exploitation:
         candidate.selection_mode = "taste"
 
-    remaining = candidates[exploitation_count:]
+    remaining = distinct[exploitation_count:]
     day = datetime.now(timezone.utc).date().isoformat()
 
     def exploration_key(candidate: Candidate) -> bytes:
@@ -576,25 +597,20 @@ def crawl_job(
     if allowance == 0:
         return {"imported": 0, "daily_cap_reached": True, "already_imported_today": today}
 
+    if job_id is None or job_id < 1:
+        raise RuntimeError("source-policy crawling requires a durable worker job id")
     reward_context = load_reward_context(connection, user_id)
     head = reward_context.head if reward_context is not None else None
-    history = []
-    feedback_refreshed = 0
-    policy_seed: int | None = None
-    policy_rng: random.Random | None = None
-    if reward_context is not None:
-        if job_id is None or job_id < 1:
-            raise RuntimeError("model-guided crawling requires a durable worker job id")
-        feedback_refreshed = refresh_human_feedback(connection, user_id)
-        history = load_action_history(connection, user_id)
-        run_day = str(input_data.get("run_day") or "")
-        seed_material = (
-            f"{user_id}:{job_id}:{run_day}:{reward_context.model_run_id}"
-        ).encode("utf-8")
-        policy_seed = int.from_bytes(
-            hashlib.sha256(seed_material).digest()[:8], "big", signed=False
-        )
-        policy_rng = random.Random(policy_seed)
+    feedback_refreshed = refresh_human_feedback(connection, user_id)
+    history = load_action_history(connection, user_id)
+    run_day = str(input_data.get("run_day") or "")
+    seed_material = (
+        f"{user_id}:{job_id}:{run_day}:{POLICY_VERSION}"
+    ).encode("utf-8")
+    policy_seed = int.from_bytes(
+        hashlib.sha256(seed_material).digest()[:8], "big", signed=False
+    )
+    policy_rng = random.Random(policy_seed)
     pool_size = min(
         limits.max_crawl_candidates,
         allowance * 3 if head is not None else allowance,
@@ -620,8 +636,6 @@ def crawl_job(
     actions: dict[int, dict[str, Any]] = {}
 
     def select_arm(available: tuple[str, ...]) -> BanditDecision:
-        if policy_rng is None:
-            raise RuntimeError("crawler bandit random generator is unavailable")
         probabilities = exp3_ix_probabilities(
             DEFAULT_CATEGORIES,
             history,
@@ -630,7 +644,6 @@ def crawl_job(
         return choose_arm(probabilities, policy_rng)
 
     def begin_action(action_index: int, decision: BanditDecision) -> int:
-        assert reward_context is not None and job_id is not None
         action_id = start_action(
             connection,
             user_id=user_id,
@@ -639,14 +652,28 @@ def crawl_job(
             decision=decision,
             context=reward_context,
             context_json={
-                "probabilities": dict(decision.probabilities),
                 "history_actions": len(history),
-                "model_comparison_count": reward_context.comparison_count,
+                "model_comparison_count": (
+                    reward_context.comparison_count
+                    if reward_context is not None
+                    else None
+                ),
+                "model_rating_count": (
+                    reward_context.rating_count
+                    if reward_context is not None
+                    else None
+                ),
+                "model_feedback_count": (
+                    reward_context.feedback_count
+                    if reward_context is not None
+                    else None
+                ),
                 "policy_discount": POLICY_DISCOUNT,
                 "source_exploration_fraction": SOURCE_EXPLORATION_FRACTION,
+                "reward_kind": "direct_1_to_5_rating",
             },
         )
-        actions[action_id] = {"seen": 0, "censored": False}
+        actions[action_id] = {"seen": 0, "censored": False, "imported": 0}
         return action_id
 
     def fail_action(action_id: int) -> None:
@@ -657,6 +684,7 @@ def crawl_job(
             status="failed",
             candidates_seen=0,
             candidates_eligible=0,
+            imported_count=0,
             proxy_reward=None,
         )
         connection.commit()
@@ -666,9 +694,9 @@ def crawl_job(
         frontier_pages = _frontier_pages(
             frontier,
             limits.max_crawl_scans,
-            arm_selector=select_arm if reward_context is not None else None,
-            action_starter=begin_action if reward_context is not None else None,
-            action_failure=fail_action if reward_context is not None else None,
+            arm_selector=select_arm,
+            action_starter=begin_action,
+            action_failure=fail_action,
         )
         for frontier_page in frontier_pages:
             source_exhaustions += int(frontier_page.exhausted)
@@ -809,9 +837,9 @@ def crawl_job(
                 candidate.score = reward_context.head.score(candidate.embedding)
                 if not math.isfinite(candidate.score):
                     raise RuntimeError("preference model returned a non-finite crawl score")
-                candidate.proxy_reward = anchor_relative_reward(
-                    reward_context, candidate.embedding
-                )
+                # Retained only as a diagnostic for the optional shared taste
+                # pre-screen. Source-policy reward comes solely from ratings.
+                candidate.proxy_reward = float(sigmoid(candidate.score))
             eligible.sort(key=lambda candidate: candidate.score, reverse=True)
 
         eligible, near_duplicate_count = _filter_near_duplicates(
@@ -828,29 +856,36 @@ def crawl_job(
         selected = _select_candidates(eligible, allowance, user_id, head)
         imported = 0
         for candidate in selected:
+            if candidate.action_id is None or candidate.action_id not in actions:
+                raise RuntimeError("crawler candidate is missing source-action attribution")
+            action = actions[candidate.action_id]
+            if int(action["imported"]) != 0:
+                raise RuntimeError("a source action selected more than one import")
             image_id = _insert_candidate(connection, user_id, candidate, head)
             if image_id is None:
                 continue
             imported += 1
-            if candidate.action_id is not None and candidate.proxy_reward is not None:
-                link_discovery(
-                    connection,
-                    user_id=user_id,
-                    action_id=candidate.action_id,
-                    image_id=image_id,
-                    proxy_reward=candidate.proxy_reward,
-                )
+            action["imported"] = 1
+            link_discovery(
+                connection,
+                user_id=user_id,
+                action_id=candidate.action_id,
+                image_id=image_id,
+                proxy_reward=candidate.proxy_reward,
+            )
 
         for action_id, action in actions.items():
             action_candidates = candidates_by_action.get(action_id, [])
-            status, proxy_reward = action_outcome(
-                [
-                    float(candidate.proxy_reward)
-                    for candidate in action_candidates
-                    if candidate.proxy_reward is not None
-                ],
+            status, _ = action_outcome(
+                int(action["imported"]),
+                eligible_count=len(action_candidates),
                 resource_censored=bool(action["censored"]),
             )
+            diagnostic_rewards = [
+                float(candidate.proxy_reward)
+                for candidate in action_candidates
+                if candidate.proxy_reward is not None
+            ]
             finish_action(
                 connection,
                 user_id=user_id,
@@ -858,7 +893,8 @@ def crawl_job(
                 status=status,
                 candidates_seen=int(action["seen"]),
                 candidates_eligible=len(action_candidates),
-                proxy_reward=proxy_reward,
+                imported_count=int(action["imported"]),
+                proxy_reward=max(diagnostic_rewards, default=None),
             )
         connection.commit()
 
@@ -868,7 +904,7 @@ def crawl_job(
         "allowance": allowance,
         "already_imported_today": today,
         "mode": "model-guided" if head is not None else "curated-seed",
-        "taste_guided_minimum": MIN_REWARD_MODEL_COMPARISONS,
+        "taste_guided_minimum": MIN_TASTE_MODEL_FEEDBACK,
         "exploration_selected": sum(
             candidate.selection_mode == "exploration" for candidate in selected
         ),
@@ -884,13 +920,28 @@ def crawl_job(
         "source_frontier": frontier,
         "source_exhaustions": source_exhaustions,
         "source_policy": {
-            "active": reward_context is not None,
-            "version": POLICY_VERSION if reward_context is not None else None,
+            "active": True,
+            "version": POLICY_VERSION,
             "history_actions": len(history),
             "actions_recorded": len(actions),
             "feedback_refreshed": feedback_refreshed,
             "model_run_id": (
                 reward_context.model_run_id if reward_context is not None else None
+            ),
+            "model_comparison_count": (
+                reward_context.comparison_count
+                if reward_context is not None
+                else None
+            ),
+            "model_rating_count": (
+                reward_context.rating_count
+                if reward_context is not None
+                else None
+            ),
+            "model_feedback_count": (
+                reward_context.feedback_count
+                if reward_context is not None
+                else None
             ),
             "policy_seed": policy_seed,
         },

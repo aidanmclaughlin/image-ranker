@@ -7,7 +7,10 @@ import { query } from "@/lib/db";
 import { safeErrorMessage } from "@/lib/redaction";
 import { workerSandboxAccess } from "@/lib/sandbox-policy";
 import {
+  latestRatingTrainingTarget,
   latestTrainingTarget,
+  nextRatingTrainingTarget,
+  nextTrainingTarget,
   trainingIsDue,
 } from "@/lib/training-cadence";
 import { WORKER_PYTHON_COMMAND } from "@/lib/worker-runtime";
@@ -63,10 +66,15 @@ const CRAWL_LABEL_BACKLOG_CAP = 20;
 const STALE_AFTER_MINUTES = 20;
 
 type TrainingState = {
+  current_comparison_count: number;
+  current_rating_count: number;
   comparison_count: number;
-  comparison_cutoff: string | null;
-  last_trained_count: number | null;
-  target_count: number;
+  comparison_cutoff: string;
+  rating_count: number;
+  rating_cutoff: string;
+  feedback_count: number;
+  last_trained_comparison_count: number | null;
+  last_trained_rating_count: number | null;
 };
 
 function requireEnvironment(name: string): string {
@@ -106,56 +114,109 @@ async function activeJob(): Promise<WorkerJob | null> {
 async function trainingState(userId: string): Promise<TrainingState> {
   const rows = await query<{
     comparison_count: number;
-    last_trained_count: number | null;
+    rating_count: number;
+    last_trained_comparison_count: number | null;
+    last_trained_rating_count: number | null;
   }>`
-    SELECT COUNT(comparison.id)::integer AS comparison_count,
-           (
-             SELECT run.comparison_count
-               FROM model_runs AS run
-              WHERE run.user_id=${userId}
-              ORDER BY run.comparison_count DESC, run.id DESC
-              LIMIT 1
-           ) AS last_trained_count
-      FROM comparisons AS comparison
-     WHERE comparison.user_id=${userId}`;
+    WITH current_counts AS (
+      SELECT
+        (SELECT COUNT(*)::integer
+           FROM comparisons
+          WHERE user_id=${userId}) AS comparison_count,
+        (SELECT COUNT(*)::integer
+           FROM image_ratings
+          WHERE user_id=${userId}) AS rating_count
+    )
+    SELECT current_counts.comparison_count,
+           current_counts.rating_count,
+           latest.comparison_count AS last_trained_comparison_count,
+           latest.rating_count AS last_trained_rating_count
+      FROM current_counts
+      LEFT JOIN LATERAL (
+        SELECT run.comparison_count, run.rating_count
+          FROM model_runs AS run
+         WHERE run.user_id=${userId}
+         ORDER BY run.feedback_count DESC, run.id DESC
+         LIMIT 1
+      ) AS latest ON TRUE`;
   const comparisonCount = Number(rows[0]?.comparison_count ?? 0);
-  const lastTrainedCount = rows[0]?.last_trained_count;
-  const normalizedLastTrainedCount =
-    lastTrainedCount === null || lastTrainedCount === undefined
+  const ratingCount = Number(rows[0]?.rating_count ?? 0);
+  const lastTrainedComparisonCount = rows[0]?.last_trained_comparison_count;
+  const lastTrainedRatingCount = rows[0]?.last_trained_rating_count;
+  const normalizedLastComparisonCount =
+    lastTrainedComparisonCount === null ||
+    lastTrainedComparisonCount === undefined
       ? null
-      : Number(lastTrainedCount);
-  const targetCount = latestTrainingTarget(
-    comparisonCount,
-    normalizedLastTrainedCount,
-  );
-  if (comparisonCount < targetCount) {
-    return {
-      comparison_count: comparisonCount,
-      comparison_cutoff: null,
-      last_trained_count: normalizedLastTrainedCount,
-      target_count: targetCount,
-    };
+      : Number(lastTrainedComparisonCount);
+  const normalizedLastRatingCount =
+    lastTrainedRatingCount === null || lastTrainedRatingCount === undefined
+      ? null
+      : Number(lastTrainedRatingCount);
+  if (
+    (normalizedLastComparisonCount !== null &&
+      normalizedLastComparisonCount > comparisonCount) ||
+    (normalizedLastRatingCount !== null &&
+      normalizedLastRatingCount > ratingCount)
+  ) {
+    throw new Error("latest model references feedback that no longer exists");
   }
 
-  // The threshold's comparison id is stable even when more labels arrive.
-  // Failed attempts therefore cannot move to fresh cutoffs and evade retry caps.
-  const cutoffRows = await query<{ comparison_cutoff: string }>`
-    SELECT id::text AS comparison_cutoff
-      FROM comparisons
-     WHERE user_id=${userId}
-     ORDER BY id
-     LIMIT 1 OFFSET ${targetCount - 1}`;
+  const comparisonDue =
+    comparisonCount >= nextTrainingTarget(normalizedLastComparisonCount);
+  const ratingDue =
+    ratingCount >= nextRatingTrainingTarget(normalizedLastRatingCount);
+  const pinnedComparisonCount = comparisonDue
+    ? latestTrainingTarget(comparisonCount, normalizedLastComparisonCount)
+    : comparisonCount;
+  const pinnedRatingCount = ratingDue
+    ? latestRatingTrainingTarget(ratingCount, normalizedLastRatingCount)
+    : ratingCount;
+
+  let comparisonCutoff = "0";
+  if (pinnedComparisonCount > 0) {
+    const cutoffRows = await query<{ comparison_cutoff: string }>`
+      SELECT id::text AS comparison_cutoff
+        FROM comparisons
+       WHERE user_id=${userId}
+       ORDER BY id
+       LIMIT 1 OFFSET ${pinnedComparisonCount - 1}`;
+    if (!cutoffRows[0]) {
+      throw new Error("comparison cutoff could not be pinned");
+    }
+    comparisonCutoff = cutoffRows[0].comparison_cutoff;
+  }
+
+  let ratingCutoff = "0";
+  if (pinnedRatingCount > 0) {
+    const cutoffRows = await query<{ rating_cutoff: string }>`
+      SELECT id::text AS rating_cutoff
+        FROM image_ratings
+       WHERE user_id=${userId}
+       ORDER BY id
+       LIMIT 1 OFFSET ${pinnedRatingCount - 1}`;
+    if (!cutoffRows[0]) {
+      throw new Error("rating cutoff could not be pinned");
+    }
+    ratingCutoff = cutoffRows[0].rating_cutoff;
+  }
+
   return {
-    comparison_count: comparisonCount,
-    comparison_cutoff: cutoffRows[0]?.comparison_cutoff ?? null,
-    last_trained_count: normalizedLastTrainedCount,
-    target_count: targetCount,
+    current_comparison_count: comparisonCount,
+    current_rating_count: ratingCount,
+    comparison_count: pinnedComparisonCount,
+    comparison_cutoff: comparisonCutoff,
+    rating_count: pinnedRatingCount,
+    rating_cutoff: ratingCutoff,
+    feedback_count: pinnedComparisonCount + pinnedRatingCount,
+    last_trained_comparison_count: normalizedLastComparisonCount,
+    last_trained_rating_count: normalizedLastRatingCount,
   };
 }
 
 async function trainingAttempts(
   userId: string,
   comparisonCutoff: string,
+  ratingCutoff: string,
   runDay: string,
 ): Promise<{
   attempts: number;
@@ -180,7 +241,8 @@ async function trainingAttempts(
            )::text AS retry_at
       FROM worker_jobs
      WHERE user_id=${userId} AND kind='train'
-       AND input_json->>'comparison_cutoff'=${comparisonCutoff}`;
+       AND input_json->>'comparison_cutoff'=${comparisonCutoff}
+       AND COALESCE(input_json->>'rating_cutoff','0')=${ratingCutoff}`;
   return {
     attempts: Number(rows[0]?.attempts ?? 0),
     attemptedToday: Boolean(rows[0]?.attempted_today),
@@ -335,14 +397,23 @@ export async function scheduleTrainingIfDue(
   await expireStaleJobs();
   if (await activeJob()) return { scheduled: false, reason: "active-job" };
   const state = await trainingState(userId);
-  if (!trainingIsDue(state.comparison_count, state.last_trained_count)) {
-    return { scheduled: false, reason: "not-due" };
-  }
-  if (!state.comparison_cutoff) {
+  if (
+    !trainingIsDue(
+      state.current_comparison_count,
+      state.last_trained_comparison_count,
+      state.current_rating_count,
+      state.last_trained_rating_count,
+    )
+  ) {
     return { scheduled: false, reason: "not-due" };
   }
   const runDay = new Date().toISOString().slice(0, 10);
-  const retry = await trainingAttempts(userId, state.comparison_cutoff, runDay);
+  const retry = await trainingAttempts(
+    userId,
+    state.comparison_cutoff,
+    state.rating_cutoff,
+    runDay,
+  );
   if (retry.attempts >= TRAIN_MAX_ATTEMPTS) {
     return {
       scheduled: false,
@@ -361,7 +432,10 @@ export async function scheduleTrainingIfDue(
   }
   const job = await createAndLaunch(userId, "train", {
     comparison_cutoff: state.comparison_cutoff,
-    comparison_count: state.target_count,
+    comparison_count: state.comparison_count,
+    rating_cutoff: state.rating_cutoff,
+    rating_count: state.rating_count,
+    feedback_count: state.feedback_count,
     run_day: runDay,
   });
   if (!job) {
@@ -374,7 +448,7 @@ export async function scheduleTrainingIfDue(
 }
 
 /**
- * Post-commit comparison hook. A launch outage cannot turn a durable Elo write
+ * Post-commit feedback hook. A launch outage cannot turn a durable label write
  * into a misleading retryable HTTP failure; the secured cron retries it.
  */
 export async function enqueueTrainingIfDue(
@@ -401,7 +475,8 @@ export async function scheduleCrawl(userId: string): Promise<ScheduleResult> {
       FROM user_images AS ui
       JOIN images AS image ON image.id=ui.image_id
      WHERE ui.user_id=${userId} AND ui.active AND image.active
-       AND ui.matches < 3`;
+       AND ui.point_rating IS NULL
+       AND ui.matches = 0`;
   if (Number(backlogRows[0]?.total ?? 0) >= CRAWL_LABEL_BACKLOG_CAP) {
     return { scheduled: false, reason: "label-backlog" };
   }

@@ -1,18 +1,17 @@
 # Lumen / Image Ranker
 
-Lumen is a private, single-owner photography taste engine. Compare two photographs, maintain a live Elo collection, train a personal pairwise vision model from your choices, and let that model discover licensed high-resolution work you are likely to value.
+Lumen is a private, single-owner photography taste engine. Rate one full-screen photograph from 1–5, build a personal collection, and let those ratings teach a rights-aware crawler where to look next.
 
 The primary product is a responsive Next.js application hosted on Vercel. Google sign-in protects the collection, Neon Postgres stores rankings and model state, private Vercel Blob stores photographs, and bounded Vercel Sandbox jobs crawl and retrain without requiring a Mac to stay online.
 
-The public repository contains only code and documentation. Photographs, comparisons, rankings, embeddings, and trained model artifacts live in the deployer's private cloud resources and never belong in Git.
+The public repository contains only code and documentation. Photographs, ratings, legacy comparisons, rankings, embeddings, and trained model artifacts live in the deployer's private cloud resources and never belong in Git.
 
 ## Product
 
-- One side-by-side, full-viewport comparison surface on desktop and mobile, with a direct **Collection** button instead of a second non-immersive mode.
-- Arrow keys choose focus, Space confirms, and `S` skips.
-- Touch either photograph, swipe toward a side to choose it, or swipe up to skip.
-- A collection view orders judged photographs by live Elo and opens the original in a lightbox.
-- A frozen OpenCLIP encoder plus a small Bradley–Terry utility head learns one person's taste from scarce pairwise labels.
+- One photograph fills the viewport on desktop and mobile; five minimal controls record an ordinal 1–5 rating and a separate icon opens the collection.
+- Number keys `1`–`5` rate, `S` skips, horizontal swipe strength maps from 1–5, and swipe up skips.
+- A collection view leads with direct ratings while preserving the live Elo earned by historical pairwise comparisons.
+- One frozen OpenCLIP encoder and one scalar utility head jointly learn from new ordinal ratings and legacy Bradley–Terry comparisons.
 - Rights-aware discovery starts from curated Wikimedia Commons Featured Pictures and becomes taste-guided as evidence accumulates.
 - Installable PWA metadata and safe-area-aware mobile layouts make ranking comfortable from a phone.
 
@@ -23,16 +22,16 @@ See [RESEARCH.md](RESEARCH.md) for the full literature review, model rationale, 
 ```mermaid
 flowchart LR
     Browser["Browser / installed web app"] -->|"Google session"| Next["Next.js on Vercel"]
-    Next -->|"user-scoped metadata and Elo"| Neon["Neon Postgres"]
+    Next -->|"ratings, legacy Elo, and policy logs"| Neon["Neon Postgres"]
     Next -->|"short-lived signed reads"| Blob["Private Vercel Blob"]
     Cron["Vercel Cron or owner action"] --> Next
     Next -->|"one bounded job"| Sandbox["Vercel Sandbox"]
-    Sandbox -->|"comparisons, embeddings, model runs"| Neon
+    Sandbox -->|"ratings, comparisons, embeddings, model runs"| Neon
     Sandbox -->|"images and model artifacts"| Blob
     Sandbox -->|"official rights-explicit API"| Commons["Wikimedia Commons"]
 ```
 
-The interactive API remains lightweight: Vercel Functions authenticate requests, choose pairs, atomically record comparisons, update Elo, and issue five-minute private image URLs. CPU-heavy decoding, OpenCLIP embedding, training, and discovery run asynchronously in an isolated Sandbox built from an explicitly source-pinned snapshot.
+The interactive API remains lightweight: Vercel Functions authenticate requests, choose an unrated photograph, atomically record its 1–5 rating, credit its source action, and issue five-minute private image URLs. CPU-heavy decoding, OpenCLIP embedding, training, and discovery run asynchronously in an isolated Sandbox built from an explicitly source-pinned snapshot.
 
 ## Deploy to Vercel
 
@@ -67,7 +66,7 @@ npm run db:schema
 npm run db:verify
 ```
 
-The schema is idempotent. It creates global image and embedding records, user-scoped ranking state, immutable comparisons, model runs, and worker jobs; its database function records a comparison and both Elo updates in one transaction.
+The schema is idempotent. It creates global image and embedding records, user-scoped ranking state, immutable ratings and comparisons, crawler-policy logs, model runs, and worker jobs; database functions make rating/reward and legacy comparison/Elo updates atomic.
 
 Create the worker's deliberately narrower database role and stream its newly
 generated direct URL into a Production-only sensitive variable without saving
@@ -78,7 +77,7 @@ npm run --silent db:worker-role | npx vercel env add LUMEN_WORKER_DATABASE_URL p
 ```
 
 The provisioning command verifies that the role can read training inputs and
-update worker-owned records, but cannot delete images or insert comparisons.
+update worker-owned records, but cannot delete images or insert human ratings or comparisons.
 Re-run it after adding worker tables or intentionally rotating its password.
 
 ### 2. Configure Google sign-in
@@ -145,7 +144,7 @@ The production schedules are intentionally modest:
 
 | Route | UTC schedule | Behavior |
 | --- | --- | --- |
-| `/api/cron/train` | `0 7 * * *` | Trains only when the comparison threshold is due. |
+| `/api/cron/train` | `0 7 * * *` | Trains only when a rating or legacy-comparison threshold is due. |
 | `/api/cron/crawl` | `0 8 * * *` | Imports a small rights-clean batch within the daily cap. |
 
 Vercel Cron sends `Authorization: Bearer $CRON_SECRET`; the routes reject requests without that exact value. The authenticated `/api/jobs` endpoint exposes the same scheduler for owner-only diagnostics, while `/api/jobs/:id` reports progress.
@@ -160,7 +159,7 @@ npm run build
 npx vercel --prod
 ```
 
-After deployment, verify the signed-out redirect, Google sign-in, pair loading, a real comparison, collection ordering, and the image lightbox on both desktop and mobile. Do not use production comparisons as synthetic test data; every saved choice is a personal label.
+After deployment, verify the signed-out redirect, Google sign-in, single-photo loading, a real rating, collection ordering, and the image lightbox on both desktop and mobile. Do not use production ratings as synthetic test data; every saved score is a personal label and a possible crawler reward.
 
 ## Migrate an existing local library
 
@@ -185,22 +184,22 @@ See [scripts/MIGRATION.md](scripts/MIGRATION.md) for the migration-specific chec
 
 ## Use on desktop and mobile
 
-Open the production URL and continue with the allowlisted Google account. Ranking always uses the full viewport; on desktop, use Left/Right to focus, Space to choose, or `S` to skip, and click a photograph to choose it immediately. Use **Collection** to open the ranked list.
+Open the production URL and continue with the allowlisted Google account. One photograph always fills the ranking viewport; press `1`–`5` to rate it or `S` to skip, and use the collection icon to open the ranked list.
 
-On iPhone or iPad, open the site in Safari and choose **Share → Add to Home Screen**. On Android, use the browser's **Install app** action when offered. Tap either photograph to choose it, swipe left or right toward the preferred side, and swipe up to skip. The collection tab shows the live Elo order; tapping a card opens its original and attribution.
+On iPhone or iPad, open the site in Safari and choose **Share → Add to Home Screen**. On Android, use the browser's **Install app** action when offered. Use the five controls or a horizontal swipe whose strength expresses 1–5; swipe up to skip. The collection shows direct ratings and retained legacy Elo; tapping a card opens its original and attribution.
 
 The Mac does not need to be online after deployment. A network connection is required to load private photographs and save choices. The hosted service worker keeps no response cache at all: it never stores authenticated HTML, API responses, photographs, rankings, or other user data, and provides only a data-free offline notice when navigation cannot reach the network.
 
 ## Ranking and model behavior
 
-- **Live ranking:** adaptive Elo makes every choice visible immediately. Every comparison is retained so rankings can be reconstructed or batch-refit later.
-- **Pair selection:** under-compared photographs and close Elo neighbors are prioritized while immediate repeats are avoided. Model uncertainty influences pairing only after a model exists.
-- **Taste model:** normalized OpenCLIP ViT-B/32 embeddings are cached once. A regularized zero-bias linear head learns `P(A > B) = sigmoid(score(A) - score(B))` from embedding differences.
-- **Training cadence:** the first smoke-test head becomes eligible at 20 comparisons, retraining runs every 20 comparisons through 100, and mature models retrain every 50 comparisons afterward. Jobs are cutoff-pinned and idempotent.
-- **Discovery:** candidates pass rights, full-decode, resolution, megapixel, byte, corruption, and duplicate gates before scoring. The model reorders only licensed, technically valid candidates; it never fabricates preference labels.
-- **Crawler bandit:** after a promoted model reaches 40 comparisons and at least four top anchors have three matches each, discounted EXP3-IX learns which source category produces the strongest image relative to those anchors. Before that gate, the persisted curated frontier remains in control.
-- **Reward correction:** an eight-head pair-group-bootstrap ensemble supplies a conservative 10th-percentile proxy reward; once a discovered image has three to eight human matches, its Elo-relative outcome progressively replaces that proxy.
-- **Exploration and audit:** source selection mixes in 20% randomized, exactly propensity-logged exploration, while each model-guided import batch independently reserves 20% for deterministic candidate exploration. Censored and failed fetches never become rewards.
+- **Direct judgment:** each image receives one immutable 1–5 ordinal rating. A skip records no preference and gives the crawler no reward.
+- **Legacy ranking:** existing pairwise comparisons and Elo remain intact; no synthetic rating is inferred from them.
+- **Taste model:** normalized OpenCLIP ViT-B/32 embeddings are cached once. One regularized scalar utility is trained with a cumulative ordinal/CORAL loss on ratings and a Bradley–Terry loss on legacy comparisons; deterministic bootstrap replicas estimate uncertainty.
+- **Training cadence:** ratings retrain every five labels through 50 and every 10 thereafter; five labels create the first candidate, 10 provide the first train/holdout split eligible for promotion, and each later five-label batch can be evaluated against the promoted head. Legacy comparisons keep their every-20-through-100, then every-50 cadence, and either due stream launches one cutoff-pinned, idempotent joint run.
+- **Discovery:** candidates pass rights, full-decode, resolution, megapixel, byte, corruption, and duplicate gates. The shared visual utility may pre-screen valid candidates, but its prediction is never a crawler reward.
+- **Crawler controller:** discounted EXP3-IX selects among source categories from the first crawl, initially uniformly. It is a context-free source bandit, not a second learned vision model and not deep reinforcement learning.
+- **Reward:** at most one imported photograph is credited to an action; its direct reward is `(rating - 1) / 4`. A fully evaluated action that imports nothing gets zero, while unrated imports remain pending and failed or censored actions are excluded.
+- **Exploration and audit:** source selection mixes in 20% randomized, exactly propensity-logged exploration. Policy versions prevent obsolete reward definitions from mixing with current history.
 
 The personal head is trained only from the owner's choices. Awards, source curation, resolution, and generic aesthetics may filter intake, but they do not become fake personal labels.
 
@@ -226,16 +225,16 @@ Hard controls in the scheduler and worker include:
 
 - one active worker globally, reinforced by a database advisory lock;
 - an 11-minute training timeout and eight-minute crawl timeout, supervised by a function capped at 780 seconds;
-- idempotent comparison cutoffs and unique model runs;
-- at most one training attempt per comparison cutoff and UTC day, plus three failed attempts per cutoff in any rolling seven-day window, with automatic retry after the window;
-- at most 10,000 comparisons and 2,000 training images in one training run;
+- idempotent rating and comparison cutoffs with unique model runs;
+- at most one training attempt per joint cutoff and UTC day, plus three failed attempts per cutoff in any rolling seven-day window, with automatic retry after the window;
+- bounded rating and comparison inputs and at most 2,000 training images in one training run;
 - at most five imports per run and per UTC day, drawn from no more than 20 eligible candidates and 100 provider records;
 - a 20-image labeling-backlog gate and persisted per-category Wikimedia continuation frontier so discovery neither outruns the owner nor rescans the same prefix forever;
 - an 80 MiB default per-image download cap, 100 MiB absolute per-image ceiling, and 300 MiB total-download ceiling per job;
 - content-addressed deduplication before storage;
 - previews and thumbnails for ordinary UI traffic, reserving originals for the lightbox;
-- preview-only, snapshot-fingerprinted embeddings and grouped-holdout promotion gates before a candidate model can rewrite utilities or steer discovery;
-- exact source-action propensities, policy/model/anchor context, outcomes, and delayed human corrections for future off-policy evaluation;
+- preview-only, snapshot-fingerprinted embeddings and grouped-holdout promotion gates before a candidate model can pre-screen discovery;
+- exact source-action propensities, policy version, outcomes, image attribution, and delayed direct ratings for future off-policy evaluation;
 - Neon compute that can scale to zero while idle.
 
 Environment variables documented in `hosted_worker/config.py` may lower worker limits but cannot raise their compiled hard ceilings. Before enabling Cron, configure [Vercel Spend Management](https://vercel.com/docs/spend-management) with notifications and a hard budget appropriate to the account, review [Sandbox usage](https://vercel.com/docs/sandbox), watch [Blob storage and transfer](https://vercel.com/docs/vercel-blob/usage-and-pricing), and keep the Neon project on a bounded plan. Cloud deployment is designed to be inexpensive at single-user volume, but storage, transfer, database, function, and Sandbox usage are still billable services.

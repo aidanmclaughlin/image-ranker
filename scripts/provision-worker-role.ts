@@ -22,8 +22,9 @@ const TABLE_POLICY: Record<string, ReadonlySet<string>> = {
   crawl_bandit_discoveries: new Set(["select", "insert"]),
   embeddings: new Set(["select", "insert"]),
   images: new Set(["select", "insert"]),
+  image_ratings: new Set(["select"]),
   model_runs: new Set(["select", "insert"]),
-  user_images: new Set(["select", "insert", "update"]),
+  user_images: new Set(["select"]),
   worker_jobs: new Set(["select", "update"]),
 };
 const SEQUENCE_POLICY: Record<string, ReadonlySet<string>> = {
@@ -48,6 +49,14 @@ type SequencePermissionRow = {
   can_usage: boolean;
   can_select: boolean;
   can_update: boolean;
+};
+
+type ColumnPermissionRow = {
+  column_name: string;
+  can_select: boolean;
+  can_insert: boolean;
+  can_update: boolean;
+  can_references: boolean;
 };
 
 function exactRelationPrivileges(
@@ -240,6 +249,19 @@ async function main(): Promise<void> {
     await client.query(
       `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM ${role}`,
     );
+    const userImageColumns = await client.query<{ column_name: string }>(
+      `SELECT column_name
+         FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='user_images'`,
+    );
+    for (const { column_name: column } of userImageColumns.rows) {
+      const identifier = escapeIdentifier(column);
+      for (const privilege of ["SELECT", "INSERT", "UPDATE", "REFERENCES"]) {
+        await client.query(
+          `REVOKE ${privilege} (${identifier}) ON user_images FROM ${role}`,
+        );
+      }
+    }
     await client.query(
       `ALTER DEFAULT PRIVILEGES IN SCHEMA public ` +
         `REVOKE ALL PRIVILEGES ON TABLES FROM ${role}`,
@@ -253,8 +275,10 @@ async function main(): Promise<void> {
     await client.query(
       `GRANT SELECT, INSERT ON images, embeddings, model_runs TO ${role}`,
     );
+    await client.query(`GRANT SELECT ON user_images TO ${role}`);
     await client.query(
-      `GRANT SELECT, INSERT, UPDATE ON user_images TO ${role}`,
+      `GRANT INSERT (user_id,image_id,predicted_utility), ` +
+        `UPDATE (predicted_utility) ON user_images TO ${role}`,
     );
     await client.query(
       `GRANT SELECT, INSERT, UPDATE ON crawl_bandit_actions TO ${role}`,
@@ -262,7 +286,7 @@ async function main(): Promise<void> {
     await client.query(
       `GRANT SELECT, INSERT ON crawl_bandit_discoveries TO ${role}`,
     );
-    await client.query(`GRANT SELECT ON comparisons TO ${role}`);
+    await client.query(`GRANT SELECT ON comparisons, image_ratings TO ${role}`);
     await client.query(`GRANT SELECT, UPDATE ON worker_jobs TO ${role}`);
     await client.query(
       `GRANT USAGE ON SEQUENCE ` +
@@ -334,6 +358,29 @@ async function main(): Promise<void> {
        WHERE namespace.nspname='public' AND relation.relkind='S'
        ORDER BY relation.relname
     `);
+    const userImageColumns = await worker.query<ColumnPermissionRow>(`
+      SELECT column_name,
+             has_column_privilege(
+               current_user, 'public.user_images', column_name, 'SELECT'
+             ) AS can_select,
+             has_column_privilege(
+               current_user, 'public.user_images', column_name, 'INSERT'
+             ) AS can_insert,
+             has_column_privilege(
+               current_user, 'public.user_images', column_name, 'UPDATE'
+             ) AS can_update,
+             has_column_privilege(
+               current_user, 'public.user_images', column_name, 'REFERENCES'
+             ) AS can_references
+        FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='user_images'
+       ORDER BY ordinal_position
+    `);
+    const insertableUserImageColumns = new Set([
+      "user_id",
+      "image_id",
+      "predicted_utility",
+    ]);
     const permissions = result.rows[0];
     if (
       permissions?.role !== ROLE ||
@@ -356,6 +403,14 @@ async function main(): Promise<void> {
         sequences.rows,
         SEQUENCE_POLICY,
         ["usage", "select", "update"],
+      ) ||
+      userImageColumns.rows.length === 0 ||
+      !userImageColumns.rows.every(
+        (column) =>
+          column.can_select &&
+          column.can_insert === insertableUserImageColumns.has(column.column_name) &&
+          column.can_update === (column.column_name === "predicted_utility") &&
+          !column.can_references,
       )
     ) {
       throw new Error("Worker role privilege verification failed");

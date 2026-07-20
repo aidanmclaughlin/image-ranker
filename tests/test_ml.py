@@ -11,13 +11,18 @@ from image_ranker.db import SCHEMA
 from image_ranker.ml import (
     PreferenceHead,
     binary_metrics,
+    build_ordinal_dataset,
     build_pairwise_dataset,
     chronological_group_split,
     deserialize_embedding,
     fit_bradley_terry,
+    fit_joint_preference,
+    fit_ordinal_thresholds,
     load_cached_embeddings,
     load_preference_head,
     maybe_load_scorer,
+    ordinal_metrics,
+    ordinal_probabilities,
     pair_prediction,
     preference_uncertainty,
     save_preference_head,
@@ -67,6 +72,32 @@ class MLNumpyTests(unittest.TestCase):
         np.testing.assert_array_equal(left, [1, 2])
         np.testing.assert_array_equal(right, [2, 1])
 
+    def test_ordinal_dataset_and_probabilities_preserve_order(self):
+        embeddings = {
+            1: np.asarray([-1.0, 0.0], dtype=np.float32),
+            2: np.asarray([1.0, 0.0], dtype=np.float32),
+        }
+        features, values, image_ids = build_ordinal_dataset(
+            [
+                {"image_id": 1, "value": 1},
+                {"image_id": 2, "value": 5},
+            ],
+            embeddings,
+        )
+        np.testing.assert_array_equal(features, [[-1.0, 0.0], [1.0, 0.0]])
+        np.testing.assert_array_equal(values, [1, 5])
+        np.testing.assert_array_equal(image_ids, [1, 2])
+
+        thresholds = np.asarray([-1.5, -0.5, 0.5, 1.5], dtype=np.float32)
+        probabilities = ordinal_probabilities([-3.0, 0.0, 3.0], thresholds)
+        np.testing.assert_allclose(probabilities.sum(axis=1), 1.0)
+        self.assertEqual(int(np.argmax(probabilities[0])) + 1, 1)
+        self.assertEqual(int(np.argmax(probabilities[1])) + 1, 3)
+        self.assertEqual(int(np.argmax(probabilities[2])) + 1, 5)
+        metrics = ordinal_metrics([1, 3, 5], probabilities)
+        self.assertEqual(metrics["accuracy"], 1.0)
+        self.assertLess(metrics["mae"], 0.7)
+
     def test_chronological_split_keeps_repeated_pairs_together(self):
         # The (1, 2) pair appears early and late. Its latest occurrence makes the
         # entire group part of the chronological validation suffix.
@@ -102,6 +133,19 @@ class MLNumpyTests(unittest.TestCase):
             loaded = load_preference_head(path)
             np.testing.assert_array_equal(loaded.weights, head.weights)
             self.assertEqual(loaded.metadata["labels"], 20)
+
+        ordinal_head = PreferenceHead(
+            np.asarray([2.0, -1.0]),
+            ordinal_thresholds=np.asarray([-1.5, -0.5, 0.5, 1.5]),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = load_preference_head(
+                save_preference_head(ordinal_head, Path(directory) / "ordinal.npz")
+            )
+        np.testing.assert_array_equal(
+            loaded.ordinal_thresholds, ordinal_head.ordinal_thresholds
+        )
+        np.testing.assert_allclose(loaded.rating_probabilities([1.0, 0.0]).sum(), 1.0)
 
     def test_training_warms_active_images_and_inactive_participants(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -163,6 +207,78 @@ class MLTorchTests(unittest.TestCase):
         probabilities = sigmoid(features @ weights)
         self.assertGreater(binary_metrics(labels, probabilities)["accuracy"], 0.99)
         self.assertTrue(np.isfinite(loss))
+
+    def test_joint_fit_learns_pointwise_and_pairwise_shared_utility(self):
+        ordinal_features = np.repeat(
+            np.asarray([[-2.0], [-1.0], [0.0], [1.0], [2.0]], dtype=np.float32),
+            8,
+            axis=0,
+        )
+        ordinal_values = np.repeat(np.arange(1, 6, dtype=np.int64), 8)
+        pairwise_features = np.asarray([[4.0], [2.0], [-4.0], [-2.0]], dtype=np.float32)
+        pairwise_labels = np.asarray([1.0, 1.0, 0.0, 0.0], dtype=np.float32)
+
+        fitted = fit_joint_preference(
+            pairwise_features,
+            pairwise_labels,
+            ordinal_features,
+            ordinal_values,
+            epochs=300,
+            learning_rate=0.04,
+            l2=0.001,
+            device="cpu",
+        )
+        self.assertIsNotNone(fitted.ordinal_thresholds)
+        self.assertTrue(np.all(np.diff(fitted.ordinal_thresholds) > 0))
+        self.assertIsNotNone(fitted.pairwise_loss)
+        self.assertIsNotNone(fitted.ordinal_loss)
+        self.assertGreater(
+            binary_metrics(
+                pairwise_labels, sigmoid(pairwise_features @ fitted.weights)
+            )["accuracy"],
+            0.99,
+        )
+        rating_predictions = ordinal_probabilities(
+            ordinal_features @ fitted.weights,
+            fitted.ordinal_thresholds,
+        )
+        self.assertGreater(
+            ordinal_metrics(ordinal_values, rating_predictions)["accuracy"], 0.75
+        )
+
+    def test_joint_fit_supports_pointwise_only_feedback(self):
+        features = np.repeat(
+            np.asarray([[-2.0], [-1.0], [0.0], [1.0], [2.0]], dtype=np.float32),
+            6,
+            axis=0,
+        )
+        values = np.repeat(np.arange(1, 6, dtype=np.int64), 6)
+        fitted = fit_joint_preference(
+            np.empty((0, 0), dtype=np.float32),
+            np.empty(0, dtype=np.float32),
+            features,
+            values,
+            epochs=250,
+            device="cpu",
+        )
+        self.assertIsNone(fitted.pairwise_loss)
+        self.assertIsNotNone(fitted.ordinal_loss)
+        self.assertTrue(np.all(np.diff(fitted.ordinal_thresholds) > 0))
+
+    def test_fixed_utility_ordinal_calibration_keeps_thresholds_ordered(self):
+        utilities = np.repeat(np.arange(-2.0, 3.0, dtype=np.float32), 6)
+        values = np.repeat(np.arange(1, 6, dtype=np.int64), 6)
+        thresholds, loss = fit_ordinal_thresholds(
+            utilities, values, epochs=200, device="cpu"
+        )
+        self.assertTrue(np.all(np.diff(thresholds) > 0))
+        self.assertTrue(np.isfinite(loss))
+        self.assertGreater(
+            ordinal_metrics(values, ordinal_probabilities(utilities, thresholds))[
+                "accuracy"
+            ],
+            0.75,
+        )
 
 
 if __name__ == "__main__":

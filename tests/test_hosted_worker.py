@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import subprocess
@@ -7,7 +8,7 @@ import unittest
 import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 from PIL import Image
@@ -21,7 +22,7 @@ from hosted_worker.blob_store import (
     upload_image,
     upload_private_blob,
 )
-from hosted_worker.bandit import BanditDecision
+from hosted_worker.bandit import POLICY_VERSION, BanditDecision
 from hosted_worker.config import WorkerLimits
 from hosted_worker.crawler import (
     Candidate,
@@ -31,15 +32,23 @@ from hosted_worker.crawler import (
     _frontier_pages,
     _initial_frontier,
     _select_candidates,
+    crawl_job,
 )
 from hosted_worker.runner import dispatch
 from hosted_worker.selfcheck import _model_state_digest
 from hosted_worker.training import (
     _bootstrap_posterior_ensemble,
+    _bounded_feedback_window,
     _bounded_participant_window,
+    _fit,
+    _fresh_validation_seed,
+    _joint_image_disjoint_split,
+    _joint_bootstrap_ensemble,
+    _load_promoted_head,
     _model_blob_path,
+    train_job,
 )
-from image_ranker.ml import PreferenceHead
+from image_ranker.ml import JointPreferenceFit, PreferenceHead
 
 
 class HostedWorkerTests(unittest.TestCase):
@@ -409,6 +418,7 @@ import image_ranker.ml
         self.assertEqual(calls[0][1], {})
         self.assertEqual(calls[1][1], {"cursor": "next"})
         self.assertEqual(calls[2][1], {})
+        self.assertEqual([call[2] for call in calls], [1, 1, 1])
         self.assertEqual(frontier["continuations"][first], {})
         self.assertEqual(frontier["continuations"][second], {})
 
@@ -451,6 +461,31 @@ import image_ranker.ml
         self.assertEqual(len(selected), 20)
         self.assertEqual(participants, [101, 102])
 
+    def test_mixed_feedback_window_is_chronological_and_bounded(self):
+        comparisons = [
+            {
+                "id": 1,
+                "created_at": "2026-01-01T00:00:00Z",
+                "left_id": 1,
+                "right_id": 2,
+            }
+        ]
+        ratings = [
+            {
+                "id": index,
+                "created_at": f"2026-01-{index:02d}T00:00:00Z",
+                "image_id": 10,
+                "value": 5,
+            }
+            for index in range(2, 22)
+        ]
+        selected_pairs, selected_ratings, participants = _bounded_feedback_window(
+            comparisons, ratings, 1
+        )
+        self.assertEqual(selected_pairs, [])
+        self.assertEqual(len(selected_ratings), 20)
+        self.assertEqual(participants, [10])
+
     def test_group_bootstrap_uncertainty_is_reproducible(self):
         features = np.asarray(
             [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]],
@@ -475,6 +510,397 @@ import image_ranker.ml
         np.testing.assert_array_equal(first, second)
         np.testing.assert_array_equal(first[0], primary)
         self.assertEqual(first_seed, second_seed)
+
+    def test_joint_group_bootstrap_is_reproducible_and_persists_thresholds(self):
+        pair_features = np.asarray([[1.0], [1.0], [-1.0], [-1.0]], dtype=np.float32)
+        pair_labels = np.asarray([1.0, 1.0, 0.0, 0.0], dtype=np.float32)
+        left = np.asarray([1, 1, 2, 2], dtype=np.int64)
+        right = np.asarray([2, 2, 1, 1], dtype=np.int64)
+        ordinal_features = np.asarray([[-1.0], [-1.0], [1.0], [1.0]], dtype=np.float32)
+        ordinal_values = np.asarray([1, 1, 5, 5], dtype=np.int64)
+        image_ids = np.asarray([1, 1, 2, 2], dtype=np.int64)
+        primary = JointPreferenceFit(
+            weights=np.asarray([0.5], dtype=np.float32),
+            ordinal_thresholds=np.asarray([-1.5, -0.5, 0.5, 1.5], dtype=np.float32),
+            objective=0.1,
+            pairwise_loss=0.1,
+            ordinal_loss=0.1,
+        )
+
+        def fake_fit(pair_x, _pair_y, ordinal_x, _ordinal_y, _limits):
+            weight = float(np.mean(pair_x)) + float(np.mean(ordinal_x))
+            return JointPreferenceFit(
+                weights=np.asarray([weight], dtype=np.float32),
+                ordinal_thresholds=np.asarray([-1.5, -0.5, 0.5, 1.5]),
+                objective=0.1,
+                pairwise_loss=0.1,
+                ordinal_loss=0.1,
+            )
+
+        with patch("hosted_worker.training._fit_feedback", side_effect=fake_fit):
+            first = _joint_bootstrap_ensemble(
+                pair_features,
+                pair_labels,
+                left,
+                right,
+                ordinal_features,
+                ordinal_values,
+                image_ids,
+                primary,
+                WorkerLimits(epochs=1),
+            )
+            second = _joint_bootstrap_ensemble(
+                pair_features,
+                pair_labels,
+                left,
+                right,
+                ordinal_features,
+                ordinal_values,
+                image_ids,
+                primary,
+                WorkerLimits(epochs=1),
+            )
+        np.testing.assert_array_equal(first[0], second[0])
+        np.testing.assert_array_equal(first[1], second[1])
+        self.assertEqual(first[2], second[2])
+        self.assertEqual(first[0].shape, (8, 1))
+        self.assertEqual(first[1].shape, (8, 4))
+        self.assertTrue(np.all(np.diff(first[1], axis=1) > 0))
+
+    def test_mixed_promotion_split_keeps_validation_images_out_of_both_inputs(self):
+        left = np.asarray([1, 2, 4, 6], dtype=np.int64)
+        right = np.asarray([2, 3, 5, 7], dtype=np.int64)
+        rating_ids = np.asarray([1, 3, 4, 8], dtype=np.int64)
+        pair_train, pair_validation, rating_train, rating_validation, validation_ids = (
+            _joint_image_disjoint_split(
+                left,
+                right,
+                rating_ids,
+                np.asarray([0], dtype=np.int64),
+                np.asarray([2], dtype=np.int64),
+            )
+        )
+        validation_images = set(map(int, validation_ids))
+        pair_training_images = {
+            *map(int, left[pair_train]),
+            *map(int, right[pair_train]),
+        }
+        rating_training_images = set(map(int, rating_ids[rating_train]))
+        self.assertFalse(pair_training_images & validation_images)
+        self.assertFalse(rating_training_images & validation_images)
+        self.assertEqual(set(pair_validation), {0})
+        self.assertEqual(set(rating_validation), {2})
+        self.assertEqual(set(pair_train), {3})
+        self.assertEqual(set(rating_train), {1, 3})
+        self.assertTrue({1, 2}.isdisjoint(set(pair_train) | set(pair_validation)))
+
+    def test_fresh_validation_uses_each_five_rating_batch(self):
+        image_ids = np.arange(1, 16, dtype=np.int64)
+        event_ids = np.arange(1, 16, dtype=np.int64)
+        np.testing.assert_array_equal(
+            _fresh_validation_seed(image_ids[:5], image_ids[:5], event_ids[:5], 0),
+            np.arange(5, dtype=np.int64),
+        )
+        np.testing.assert_array_equal(
+            _fresh_validation_seed(image_ids, image_ids, event_ids, 10),
+            np.arange(10, 15, dtype=np.int64),
+        )
+        left_ids = np.asarray([1, 2, 3, 4, 5, 6, 6], dtype=np.int64)
+        right_ids = np.asarray([2, 3, 4, 5, 6, 7, 7], dtype=np.int64)
+        np.testing.assert_array_equal(
+            _fresh_validation_seed(
+                left_ids,
+                right_ids,
+                np.arange(1, 8, dtype=np.int64),
+                0,
+            ),
+            np.arange(2, 7, dtype=np.int64),
+        )
+
+    @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch is not installed")
+    def test_point_rating_promotion_first_becomes_viable_at_ten(self):
+        thresholds = np.asarray([-3.0, -1.0, 1.0, 3.0], dtype=np.float32)
+        fitted = JointPreferenceFit(
+            weights=np.asarray([1.0], dtype=np.float32),
+            ordinal_thresholds=thresholds,
+            objective=0.1,
+            pairwise_loss=None,
+            ordinal_loss=0.1,
+        )
+
+        def run(count):
+            ratings = [
+                {"id": index + 1, "image_id": index + 1, "value": index % 5 + 1}
+                for index in range(count)
+            ]
+            embeddings = {
+                index + 1: np.asarray([float((index % 5 - 2) * 2)], dtype=np.float32)
+                for index in range(count)
+            }
+            with (
+                patch("hosted_worker.training._fit_feedback", return_value=fitted),
+                patch(
+                    "hosted_worker.training._joint_bootstrap_ensemble",
+                    return_value=(
+                        np.ones((8, 1), dtype=np.float32),
+                        np.tile(thresholds, (8, 1)),
+                        7,
+                    ),
+                ),
+                patch("hosted_worker.training.hosted_encoder_id", return_value="test-encoder"),
+            ):
+                return _fit(
+                    [], ratings, embeddings, WorkerLimits(epochs=1), None
+                )[1]
+
+        five = run(5)
+        ten = run(10)
+        self.assertFalse(five["promotion"]["promoted"])
+        self.assertFalse(five["holdout"]["eligible"])
+        self.assertTrue(ten["promotion"]["promoted"])
+        self.assertEqual(ten["holdout"]["ordinal"]["count"], 5)
+
+    @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch is not installed")
+    def test_rating_retrain_does_not_reuse_static_pair_holdout_against_prior(self):
+        comparisons = [
+            {
+                "id": index + 1,
+                "left_id": 100 + index * 2,
+                "right_id": 101 + index * 2,
+                "winner_id": 100 + index * 2,
+            }
+            for index in range(25)
+        ]
+        ratings = [
+            {
+                "id": index + 1,
+                "image_id": index + 1,
+                "value": index % 5 + 1,
+            }
+            for index in range(15)
+        ]
+        embeddings = {
+            image_id: np.asarray(
+                [float((((image_id - 1) % 5) - 2) * 2)], dtype=np.float32
+            )
+            for image_id in {
+                *(int(row["left_id"]) for row in comparisons),
+                *(int(row["right_id"]) for row in comparisons),
+                *(int(row["image_id"]) for row in ratings),
+            }
+        }
+        thresholds = np.asarray([-3.0, -1.0, 1.0, 3.0], dtype=np.float32)
+        fitted = JointPreferenceFit(
+            weights=np.asarray([1.0], dtype=np.float32),
+            ordinal_thresholds=thresholds,
+            objective=0.1,
+            pairwise_loss=0.1,
+            ordinal_loss=0.1,
+        )
+        prior = PreferenceHead(
+            np.asarray([1.0], dtype=np.float32),
+            encoder="test-encoder",
+            ordinal_thresholds=thresholds,
+            metadata={"comparison_cutoff": 25, "rating_cutoff": 10},
+        )
+        with (
+            patch("hosted_worker.training._fit_feedback", return_value=fitted) as fit,
+            patch(
+                "hosted_worker.training._joint_bootstrap_ensemble",
+                return_value=(
+                    np.ones((8, 1), dtype=np.float32),
+                    np.tile(thresholds, (8, 1)),
+                    7,
+                ),
+            ),
+            patch("hosted_worker.training.hosted_encoder_id", return_value="test-encoder"),
+        ):
+            _head, metrics, _ensemble, _ensemble_thresholds = _fit(
+                comparisons,
+                ratings,
+                embeddings,
+                WorkerLimits(epochs=1),
+                prior,
+            )
+        self.assertEqual(fit.call_count, 2)
+        self.assertIsNone(metrics["holdout"]["pairwise"])
+        self.assertEqual(metrics["holdout"]["split"]["training_comparisons"], 25)
+        self.assertEqual(metrics["holdout"]["ordinal"]["fresh_prior_count"], 5)
+        self.assertTrue(metrics["promotion"]["promoted"])
+
+    def test_promoted_head_carries_feedback_cutoffs(self):
+        cursor = MagicMock()
+        cursor.__enter__.return_value = cursor
+        cursor.fetchone.return_value = {
+            "weights_json": {
+                "encoder": "test-encoder",
+                "dimensions": 1,
+                "weights": [0.25],
+                "ordinal_thresholds": [-1.5, -0.5, 0.5, 1.5],
+            },
+            "comparison_cutoff": 70,
+            "rating_cutoff": 15,
+        }
+        connection = SimpleNamespace(cursor=lambda: cursor)
+        with patch("hosted_worker.training.hosted_encoder_id", return_value="test-encoder"):
+            head = _load_promoted_head(connection, "owner")
+        self.assertEqual(head.metadata["comparison_cutoff"], 70)
+        self.assertEqual(head.metadata["rating_cutoff"], 15)
+
+    @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch is not installed")
+    def test_undersupported_joint_holdout_cannot_promote(self):
+        validation_pairs = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10)]
+        prefix_pairs = [
+            (left_id, right_id)
+            for left_id in range(1, 11)
+            for right_id in range(left_id + 1, 11)
+            if (left_id, right_id) not in validation_pairs
+        ][:20]
+        comparisons = [
+            {
+                "left_id": left_id,
+                "right_id": right_id,
+                "winner_id": right_id,
+            }
+            for left_id, right_id in [*prefix_pairs, *validation_pairs]
+        ]
+        ratings = [
+            {"image_id": index, "value": index % 5 + 1}
+            for index in range(1, 16)
+        ]
+        embeddings = {
+            index: np.asarray([float(index)], dtype=np.float32)
+            for index in range(1, 16)
+        }
+        thresholds = np.asarray([-1.5, -0.5, 0.5, 1.5], dtype=np.float32)
+        fitted = JointPreferenceFit(
+            weights=np.asarray([0.1], dtype=np.float32),
+            ordinal_thresholds=thresholds,
+            objective=0.1,
+            pairwise_loss=0.1,
+            ordinal_loss=0.1,
+        )
+        with (
+            patch("hosted_worker.training._fit_feedback", return_value=fitted) as fit,
+            patch(
+                "hosted_worker.training._joint_bootstrap_ensemble",
+                return_value=(
+                    np.ones((8, 1), dtype=np.float32),
+                    np.tile(thresholds, (8, 1)),
+                    7,
+                ),
+            ),
+            patch("hosted_worker.training.hosted_encoder_id", return_value="test-encoder"),
+        ):
+            _head, metrics, _ensemble, _ensemble_thresholds = _fit(
+                comparisons,
+                ratings,
+                embeddings,
+                WorkerLimits(epochs=1),
+                None,
+            )
+        self.assertEqual(fit.call_count, 1)
+        self.assertFalse(metrics["promotion"]["promoted"])
+        self.assertFalse(metrics["holdout"]["eligible"])
+        self.assertIn("too little training feedback", metrics["promotion"]["reason"])
+
+    def test_pointwise_train_job_accepts_rating_cutoff_and_counts(self):
+        ratings = [
+            {
+                "id": index,
+                "created_at": f"2026-01-{index:02d}T00:00:00Z",
+                "image_id": index,
+                "value": (index - 1) % 5 + 1,
+            }
+            for index in range(1, 6)
+        ]
+        thresholds = np.asarray([-1.5, -0.5, 0.5, 1.5], dtype=np.float32)
+        head = PreferenceHead(np.asarray([1.0]), ordinal_thresholds=thresholds)
+        metrics = {
+            "promotion": {"promoted": True, "reason": "passed"},
+            "training_accuracy": 0.8,
+            "holdout": {"ordinal": {}},
+        }
+        connection = SimpleNamespace(
+            commit=lambda: None,
+            rollback=lambda: None,
+        )
+        persisted = {}
+
+        def fake_persist(_connection, **kwargs):
+            persisted.update(kwargs)
+            return 7
+
+        with (
+            patch("hosted_worker.training._model_exists", return_value=False),
+            patch("hosted_worker.training._load_ratings", return_value=(ratings, 5)),
+            patch(
+                "hosted_worker.training._load_image_rows",
+                return_value=[
+                    {"id": index, "preview_blob_path": f"{index}.webp"}
+                    for index in range(1, 6)
+                ],
+            ),
+            patch(
+                "hosted_worker.training.ensure_hosted_embeddings",
+                return_value={
+                    index: np.asarray([float(index)], dtype=np.float32)
+                    for index in range(1, 6)
+                },
+            ),
+            patch("hosted_worker.training._load_promoted_head", return_value=None),
+            patch(
+                "hosted_worker.training._fit",
+                return_value=(
+                    head,
+                    metrics,
+                    np.ones((8, 1), dtype=np.float32),
+                    np.tile(thresholds, (8, 1)),
+                ),
+            ),
+            patch("hosted_worker.training._persist_model", side_effect=fake_persist),
+            patch("hosted_worker.training._update_utilities", return_value=5),
+        ):
+            result = train_job(
+                connection,
+                "owner",
+                {"rating_cutoff": 5, "rating_count": 5, "feedback_count": 5},
+                WorkerLimits(epochs=1),
+            )
+        self.assertEqual(result["comparison_cutoff"], 0)
+        self.assertEqual(result["rating_cutoff"], 5)
+        self.assertEqual(result["ratings_used"], 5)
+        self.assertEqual(persisted["feedback_count"], 5)
+        np.testing.assert_array_equal(persisted["head"].ordinal_thresholds, thresholds)
+
+    @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch is not installed")
+    def test_pointwise_fit_produces_ordered_threshold_metrics(self):
+        ratings = []
+        embeddings = {}
+        for index in range(30):
+            value = index % 5 + 1
+            image_id = index + 1
+            ratings.append({"image_id": image_id, "value": value})
+            embeddings[image_id] = np.asarray([float(value - 3)], dtype=np.float32)
+        with patch("hosted_worker.training.hosted_encoder_id", return_value="test-encoder"):
+            head, metrics, ensemble, ensemble_thresholds = _fit(
+                [],
+                ratings,
+                embeddings,
+                WorkerLimits(epochs=100),
+                PreferenceHead(np.asarray([0.5]), encoder="test-encoder"),
+            )
+        self.assertIsNotNone(head.ordinal_thresholds)
+        self.assertTrue(np.all(np.diff(head.ordinal_thresholds) > 0))
+        self.assertEqual(metrics["ratings_used"], 30)
+        self.assertEqual(metrics["comparisons_used"], 0)
+        self.assertEqual(metrics["uncertainty"]["method"], "feedback_group_bootstrap_v2")
+        self.assertEqual(
+            metrics["holdout"]["ordinal"]["prior_threshold_source"],
+            "calibrated_on_training_holdout_prefix",
+        )
+        self.assertEqual(ensemble.shape, (8, 1))
+        self.assertEqual(ensemble_thresholds.shape, (8, 4))
 
     def test_limits_can_only_be_lowered_within_hard_caps(self):
         with patch.dict(
@@ -536,6 +962,71 @@ import image_ranker.ml
         self.assertEqual(
             sum(item.selection_mode == "exploration" for item in selected), 1
         )
+
+    def test_candidate_selection_allows_only_one_import_per_source_action(self):
+        candidates = []
+        for index, action_id in enumerate((7, 7, 8, 9)):
+            candidates.append(
+                Candidate(
+                    metadata={"index": index},
+                    path=Path(f"{index}.jpg"),
+                    payload=ImagePayload(
+                        sha256=f"{index:064x}",
+                        extension="jpg",
+                        width=1600,
+                        height=1200,
+                        original=b"image",
+                        preview=b"preview",
+                        thumbnail=b"thumb",
+                    ),
+                    action_id=action_id,
+                )
+            )
+        selected = _select_candidates(candidates, 4, "user", None)
+        self.assertEqual([item.action_id for item in selected], [7, 8, 9])
+        self.assertEqual([item.metadata["index"] for item in selected], [0, 2, 3])
+
+    def test_source_policy_runs_without_a_taste_model(self):
+        captured = {}
+
+        def no_frontier_pages(frontier, maximum, **kwargs):
+            captured.update(kwargs)
+            captured["maximum"] = maximum
+            return iter(())
+
+        connection = SimpleNamespace(commit=lambda: None)
+        with (
+            patch("hosted_worker.crawler.imported_today", return_value=0),
+            patch("hosted_worker.crawler.load_reward_context", return_value=None),
+            patch("hosted_worker.crawler.refresh_human_feedback", return_value=0) as refresh,
+            patch("hosted_worker.crawler.load_action_history", return_value=[]) as history,
+            patch("hosted_worker.crawler._source_frontier", return_value=_initial_frontier()),
+            patch("hosted_worker.crawler._existing_user_provenance", return_value=(set(), set())),
+            patch(
+                "hosted_worker.crawler._existing_embedding_matrix",
+                return_value=np.empty((0, 0), dtype=np.float32),
+            ),
+            patch("hosted_worker.crawler._frontier_pages", side_effect=no_frontier_pages),
+        ):
+            result = crawl_job(
+                connection,
+                "user",
+                {"requested_imports": 1, "run_day": "2026-07-19"},
+                WorkerLimits(),
+                job_id=19,
+            )
+        refresh.assert_called_once_with(connection, "user")
+        history.assert_called_once_with(connection, "user")
+        self.assertIsNotNone(captured["arm_selector"])
+        self.assertIsNotNone(captured["action_starter"])
+        self.assertIsNotNone(captured["action_failure"])
+        self.assertTrue(result["source_policy"]["active"])
+        self.assertEqual(result["source_policy"]["version"], POLICY_VERSION)
+        self.assertIsNone(result["source_policy"]["model_run_id"])
+        self.assertIsNone(result["source_policy"]["model_comparison_count"])
+        self.assertIsNone(result["source_policy"]["model_rating_count"])
+        self.assertIsNone(result["source_policy"]["model_feedback_count"])
+        self.assertIsInstance(result["source_policy"]["policy_seed"], int)
 
     def test_image_payload_is_content_addressed_and_has_renditions(self):
         with tempfile.TemporaryDirectory() as directory:

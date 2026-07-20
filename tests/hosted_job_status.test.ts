@@ -29,7 +29,11 @@ test("operations status reports latest state and last success per job kind", () 
       id: "1",
       kind: "train",
       status: "succeeded",
-      output_json: { comparison_count: 50 },
+      output_json: {
+        comparison_count: 35,
+        rating_count: 15,
+        feedback_count: 50,
+      },
       finished_at: "2026-07-11T12:05:00.000Z",
     }),
     job({
@@ -53,6 +57,48 @@ test("operations status reports latest state and last success per job kind", () 
   assert.equal(summaries[0]?.note, "5 new photographs added.");
   assert.equal(summaries[1]?.state, "Running");
   assert.equal(summaries[1]?.lastSuccessAt, "2026-07-11T12:05:00.000Z");
+});
+
+test("successful training reports ratings, legacy choices, and total feedback", () => {
+  const mixed = summarizeJobKind(
+    [
+      job({
+        id: "1",
+        kind: "train",
+        status: "succeeded",
+        output_json: {
+          comparison_count: 12,
+          rating_count: 8,
+          feedback_count: 20,
+        },
+      }),
+    ],
+    "train",
+  );
+  assert.equal(
+    mixed.note,
+    "Model trained on 8 ratings and 12 legacy choices (20 feedback events total).",
+  );
+
+  const ratingsOnly = summarizeJobKind(
+    [
+      job({
+        id: "2",
+        kind: "train",
+        status: "succeeded",
+        output_json: {
+          comparison_count: 0,
+          rating_count: 1,
+          feedback_count: 1,
+        },
+      }),
+    ],
+    "train",
+  );
+  assert.equal(
+    ratingsOnly.note,
+    "Model trained on 1 rating (1 feedback event total).",
+  );
 });
 
 test("three failed attempts at one stable cutoff surface a paused retry state", () => {
@@ -90,6 +136,37 @@ test("failed training automatically becomes retryable after seven days", () => {
     failures,
     "train",
     Date.parse("2026-07-22T12:00:01.000Z"),
+  );
+
+  assert.equal(summary.state, "Needs attention");
+  assert.equal(summary.retriesExhausted, false);
+});
+
+test("training retries are grouped by both feedback cutoffs", () => {
+  const failures = [
+    job({
+      id: "1",
+      kind: "train",
+      status: "failed",
+      input_json: { comparison_cutoff: "42", rating_cutoff: "7" },
+    }),
+    job({
+      id: "2",
+      kind: "train",
+      status: "failed",
+      input_json: { comparison_cutoff: "42", rating_cutoff: "7" },
+    }),
+    job({
+      id: "3",
+      kind: "train",
+      status: "failed",
+      input_json: { comparison_cutoff: "42", rating_cutoff: "8" },
+    }),
+  ];
+  const summary = summarizeJobKind(
+    failures,
+    "train",
+    Date.parse("2026-07-17T12:00:00.000Z"),
   );
 
   assert.equal(summary.state, "Needs attention");

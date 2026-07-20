@@ -19,6 +19,8 @@ PRETRAINED = "laion2b_s34b_b79k"
 ENCODER = f"{MODEL_NAME}/{PRETRAINED}"
 LATEST_ARTIFACT = "preference-head.npz"
 MIN_COMPARISONS = 20
+MIN_RATINGS = 5
+ORDINAL_LEVELS = 5
 
 
 class MLDependencyError(RuntimeError):
@@ -98,6 +100,7 @@ class PreferenceHead:
     weights: np.ndarray
     encoder: str = ENCODER
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    ordinal_thresholds: Optional[np.ndarray] = None
 
     def __post_init__(self) -> None:
         weights = np.asarray(self.weights, dtype=np.float32)
@@ -107,6 +110,15 @@ class PreferenceHead:
             raise ValueError("preference weights contain non-finite values")
         object.__setattr__(self, "weights", weights.copy())
         object.__setattr__(self, "metadata", dict(self.metadata))
+        if self.ordinal_thresholds is not None:
+            thresholds = np.asarray(self.ordinal_thresholds, dtype=np.float32)
+            if thresholds.shape != (ORDINAL_LEVELS - 1,):
+                raise ValueError(
+                    f"ordinal thresholds must have {ORDINAL_LEVELS - 1} values"
+                )
+            if not np.isfinite(thresholds).all() or np.any(np.diff(thresholds) <= 0):
+                raise ValueError("ordinal thresholds must be finite and strictly ordered")
+            object.__setattr__(self, "ordinal_thresholds", thresholds.copy())
 
     @property
     def dimensions(self) -> int:
@@ -132,6 +144,41 @@ class PreferenceHead:
 
     def predict_pair(self, left: np.ndarray, right: np.ndarray) -> dict[str, float]:
         return pair_prediction(self.score(left), self.score(right))
+
+    def rating_probabilities(
+        self, embedding: Union[np.ndarray, Sequence[float]]
+    ) -> np.ndarray:
+        """Predict probabilities for ratings 1 through 5 when ordinally trained."""
+        if self.ordinal_thresholds is None:
+            raise RuntimeError("this preference head has no ordinal thresholds")
+        return np.asarray(
+            ordinal_probabilities(self.score(embedding), self.ordinal_thresholds),
+            dtype=np.float64,
+        )
+
+
+@dataclass(frozen=True)
+class JointPreferenceFit:
+    """Parameters and objective components for one shared visual utility model."""
+
+    weights: np.ndarray
+    ordinal_thresholds: Optional[np.ndarray]
+    objective: float
+    pairwise_loss: Optional[float]
+    ordinal_loss: Optional[float]
+
+    def __post_init__(self) -> None:
+        weights = np.asarray(self.weights, dtype=np.float32)
+        if weights.ndim != 1 or weights.size == 0 or not np.isfinite(weights).all():
+            raise ValueError("joint preference weights must be a finite vector")
+        object.__setattr__(self, "weights", weights.copy())
+        if self.ordinal_thresholds is not None:
+            thresholds = np.asarray(self.ordinal_thresholds, dtype=np.float32)
+            if thresholds.shape != (ORDINAL_LEVELS - 1,):
+                raise ValueError("joint ordinal thresholds have an unexpected shape")
+            if not np.isfinite(thresholds).all() or np.any(np.diff(thresholds) <= 0):
+                raise ValueError("joint ordinal thresholds must be strictly ordered")
+            object.__setattr__(self, "ordinal_thresholds", thresholds.copy())
 
 
 def _validated_vector(vector: Union[np.ndarray, Sequence[float]], dimensions: int) -> np.ndarray:
@@ -370,6 +417,51 @@ def build_pairwise_dataset(
     )
 
 
+def build_ordinal_dataset(
+    ratings: Sequence[Any],
+    embeddings: Mapping[int, np.ndarray],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build pointwise embedding, 1--5 value, and image-id arrays."""
+    features = []
+    values = []
+    image_ids = []
+    dimensions: Optional[int] = None
+    for rating in ratings:
+        if isinstance(rating, Mapping):
+            image_id = int(rating["image_id"])
+            value = int(rating["value"])
+        else:
+            try:
+                image_id = int(rating["image_id"])
+                value = int(rating["value"])
+            except (IndexError, TypeError):
+                image_id, value = map(int, rating[:2])
+        if not 1 <= value <= ORDINAL_LEVELS:
+            raise ValueError(f"rating value must be between 1 and {ORDINAL_LEVELS}")
+        if image_id not in embeddings:
+            raise ValueError(f"rating references image {image_id} without an embedding")
+        vector = np.asarray(embeddings[image_id], dtype=np.float32)
+        if vector.ndim != 1 or vector.size == 0 or not np.isfinite(vector).all():
+            raise ValueError("rating embeddings must be finite non-empty vectors")
+        dimensions = dimensions or int(vector.size)
+        if vector.size != dimensions:
+            raise ValueError("all rating embeddings must use the same dimensions")
+        features.append(vector)
+        values.append(value)
+        image_ids.append(image_id)
+    if not features:
+        return (
+            np.empty((0, dimensions or 0), dtype=np.float32),
+            np.empty(0, dtype=np.int64),
+            np.empty(0, dtype=np.int64),
+        )
+    return (
+        np.asarray(features, dtype=np.float32),
+        np.asarray(values, dtype=np.int64),
+        np.asarray(image_ids, dtype=np.int64),
+    )
+
+
 def chronological_group_split(
     left_ids: Sequence[int],
     right_ids: Sequence[int],
@@ -445,6 +537,332 @@ def binary_metrics(labels: Sequence[float], probabilities: Sequence[float]) -> d
     }
 
 
+def ordinal_probabilities(
+    utilities: Union[float, np.ndarray, Sequence[float]],
+    thresholds: Union[np.ndarray, Sequence[float]],
+) -> np.ndarray:
+    """Convert utilities into coherent probabilities for ordered values 1--5."""
+    utility_array = np.asarray(utilities, dtype=np.float64)
+    scalar = utility_array.ndim == 0
+    if scalar:
+        utility_array = utility_array.reshape(1)
+    if utility_array.ndim != 1 or not np.isfinite(utility_array).all():
+        raise ValueError("utilities must be a finite scalar or one-dimensional array")
+    threshold_array = np.asarray(thresholds, dtype=np.float64)
+    if threshold_array.shape != (ORDINAL_LEVELS - 1,):
+        raise ValueError(f"thresholds must contain {ORDINAL_LEVELS - 1} values")
+    if not np.isfinite(threshold_array).all() or np.any(np.diff(threshold_array) <= 0):
+        raise ValueError("thresholds must be finite and strictly ordered")
+
+    cumulative = np.asarray(
+        sigmoid(utility_array[:, None] - threshold_array[None, :]),
+        dtype=np.float64,
+    )
+    probabilities = np.concatenate(
+        (
+            1.0 - cumulative[:, :1],
+            cumulative[:, :-1] - cumulative[:, 1:],
+            cumulative[:, -1:],
+        ),
+        axis=1,
+    )
+    # Ordered thresholds make these non-negative analytically. Clipping only
+    # absorbs floating-point cancellation at extreme utilities.
+    probabilities = np.clip(probabilities, 0.0, 1.0)
+    probabilities /= probabilities.sum(axis=1, keepdims=True)
+    return probabilities[0] if scalar else probabilities
+
+
+def ordinal_metrics(
+    values: Sequence[int], probabilities: Union[np.ndarray, Sequence[Sequence[float]]]
+) -> dict[str, float]:
+    targets = np.asarray(values, dtype=np.int64)
+    predicted = np.asarray(probabilities, dtype=np.float64)
+    if targets.ndim != 1 or targets.size == 0:
+        raise ValueError("at least one ordinal target is required")
+    if predicted.shape != (targets.size, ORDINAL_LEVELS):
+        raise ValueError(
+            f"ordinal probabilities must have shape ({targets.size}, {ORDINAL_LEVELS})"
+        )
+    if np.any((targets < 1) | (targets > ORDINAL_LEVELS)):
+        raise ValueError(f"ordinal targets must be between 1 and {ORDINAL_LEVELS}")
+    if not np.isfinite(predicted).all() or np.any(predicted < 0):
+        raise ValueError("ordinal probabilities must be finite and non-negative")
+    row_sums = predicted.sum(axis=1)
+    if not np.allclose(row_sums, 1.0, atol=1e-6):
+        raise ValueError("ordinal probability rows must sum to one")
+
+    chosen = np.clip(predicted[np.arange(targets.size), targets - 1], 1e-7, 1.0)
+    levels = np.arange(1, ORDINAL_LEVELS + 1, dtype=np.float64)
+    expected = predicted @ levels
+    classes = np.argmax(predicted, axis=1) + 1
+    one_hot = np.eye(ORDINAL_LEVELS, dtype=np.float64)[targets - 1]
+    return {
+        "count": int(targets.size),
+        "accuracy": float(np.mean(classes == targets)),
+        "mae": float(np.mean(np.abs(expected - targets))),
+        "log_loss": float(-np.mean(np.log(chosen))),
+        "brier": float(np.mean(np.sum((predicted - one_hot) ** 2, axis=1))),
+        "mean_expected_value": float(np.mean(expected)),
+    }
+
+
+def _initial_ordinal_thresholds(values: np.ndarray) -> np.ndarray:
+    """Smoothed empirical logits provide stable, ordered CORAL initialization."""
+    count = int(values.size)
+    cumulative_probabilities = np.asarray(
+        [
+            (float(np.count_nonzero(values > level)) + 0.5) / (count + 1.0)
+            for level in range(1, ORDINAL_LEVELS)
+        ],
+        dtype=np.float64,
+    )
+    thresholds = np.log1p(-cumulative_probabilities) - np.log(
+        cumulative_probabilities
+    )
+    minimum_gap = 0.05
+    for index in range(1, thresholds.size):
+        thresholds[index] = max(
+            thresholds[index], thresholds[index - 1] + minimum_gap
+        )
+    return thresholds.astype(np.float32)
+
+
+def fit_ordinal_thresholds(
+    utilities: Union[np.ndarray, Sequence[float]],
+    values: Union[np.ndarray, Sequence[int]],
+    *,
+    epochs: int = 300,
+    learning_rate: float = 0.03,
+    device: Optional[str] = None,
+) -> Tuple[np.ndarray, float]:
+    """Calibrate ordered 1--5 thresholds while keeping a utility head fixed."""
+    scores = np.asarray(utilities, dtype=np.float32)
+    targets = np.asarray(values, dtype=np.int64)
+    if scores.ndim != 1 or scores.size == 0 or targets.shape != scores.shape:
+        raise ValueError("utilities and ordinal values must be matching non-empty vectors")
+    if not np.isfinite(scores).all():
+        raise ValueError("utilities contain non-finite values")
+    if np.any((targets < 1) | (targets > ORDINAL_LEVELS)):
+        raise ValueError(f"ordinal values must be between 1 and {ORDINAL_LEVELS}")
+    if epochs < 1 or learning_rate <= 0:
+        raise ValueError("epochs and learning_rate must be positive")
+
+    torch = _require_torch()
+    selected_device = device or preferred_device(torch)
+    score_tensor = torch.as_tensor(scores, dtype=torch.float32, device=selected_device)
+    value_tensor = torch.as_tensor(targets, dtype=torch.int64, device=selected_device)
+    levels = torch.arange(
+        1, ORDINAL_LEVELS, dtype=torch.int64, device=selected_device
+    )
+    cumulative_targets = (value_tensor[:, None] > levels[None, :]).to(
+        dtype=torch.float32
+    )
+    initial = _initial_ordinal_thresholds(targets)
+    minimum_gap = 1e-3
+    threshold_start = torch.tensor(
+        float(initial[0]),
+        dtype=torch.float32,
+        device=selected_device,
+        requires_grad=True,
+    )
+    gaps = np.maximum(np.diff(initial) - minimum_gap, 1e-4)
+    gap_logits = torch.tensor(
+        np.log(np.expm1(gaps)).astype(np.float32),
+        dtype=torch.float32,
+        device=selected_device,
+        requires_grad=True,
+    )
+
+    def ordered() -> Any:
+        positive_gaps = torch.nn.functional.softplus(gap_logits) + minimum_gap
+        return torch.cat(
+            (
+                threshold_start.reshape(1),
+                threshold_start + torch.cumsum(positive_gaps, 0),
+            )
+        )
+
+    optimizer = torch.optim.Adam([threshold_start, gap_logits], lr=learning_rate)
+    loss = None
+    for _ in range(epochs):
+        optimizer.zero_grad(set_to_none=True)
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            score_tensor[:, None] - ordered()[None, :], cumulative_targets
+        )
+        loss.backward()
+        optimizer.step()
+    assert loss is not None
+    return (
+        ordered().detach().cpu().numpy().astype(np.float32, copy=False),
+        float(loss.detach().cpu()),
+    )
+
+
+def fit_joint_preference(
+    pairwise_features: np.ndarray,
+    pairwise_labels: np.ndarray,
+    ordinal_features: np.ndarray,
+    ordinal_values: np.ndarray,
+    *,
+    epochs: int = 300,
+    learning_rate: float = 0.03,
+    l2: float = 0.01,
+    pairwise_weight: float = 1.0,
+    ordinal_weight: float = 1.0,
+    device: Optional[str] = None,
+) -> JointPreferenceFit:
+    """Fit one linear utility with Bradley--Terry and CORAL-style objectives.
+
+    Each source contributes its own mean loss, so four cumulative ordinal tasks
+    do not overwhelm sparse legacy comparisons. Positive softplus gaps enforce
+    strictly ordered thresholds throughout optimization.
+    """
+    if epochs < 1:
+        raise ValueError("epochs must be positive")
+    if learning_rate <= 0 or l2 < 0:
+        raise ValueError("learning_rate must be positive and l2 cannot be negative")
+    if pairwise_weight <= 0 or ordinal_weight <= 0:
+        raise ValueError("feedback source weights must be positive")
+
+    pair_matrix = np.asarray(pairwise_features, dtype=np.float32)
+    pair_targets = np.asarray(pairwise_labels, dtype=np.float32)
+    ordinal_matrix = np.asarray(ordinal_features, dtype=np.float32)
+    ordinal_targets = np.asarray(ordinal_values, dtype=np.int64)
+    if pair_matrix.ndim != 2 or ordinal_matrix.ndim != 2:
+        raise ValueError("feedback feature arrays must be two-dimensional")
+    if pair_targets.shape != (pair_matrix.shape[0],):
+        raise ValueError("pairwise labels must match pairwise feature rows")
+    if ordinal_targets.shape != (ordinal_matrix.shape[0],):
+        raise ValueError("ordinal values must match ordinal feature rows")
+    if np.any((pair_targets != 0) & (pair_targets != 1)):
+        raise ValueError("pairwise labels must be binary")
+    if np.any((ordinal_targets < 1) | (ordinal_targets > ORDINAL_LEVELS)):
+        raise ValueError(f"ordinal values must be between 1 and {ORDINAL_LEVELS}")
+    if not np.isfinite(pair_matrix).all() or not np.isfinite(ordinal_matrix).all():
+        raise ValueError("feedback features contain non-finite values")
+    has_pairs = pair_matrix.shape[0] > 0
+    has_ratings = ordinal_matrix.shape[0] > 0
+    if not has_pairs and not has_ratings:
+        raise ValueError("at least one pairwise comparison or ordinal rating is required")
+    dimensions = ordinal_matrix.shape[1] if has_ratings else pair_matrix.shape[1]
+    if dimensions < 1:
+        raise ValueError("feedback features must have at least one column")
+    if has_pairs and pair_matrix.shape[1] != dimensions:
+        raise ValueError("pairwise and ordinal features use different dimensions")
+    if has_ratings and ordinal_matrix.shape[1] != dimensions:
+        raise ValueError("pairwise and ordinal features use different dimensions")
+
+    torch = _require_torch()
+    selected_device = device or preferred_device(torch)
+    weights = torch.zeros(
+        dimensions,
+        dtype=torch.float32,
+        device=selected_device,
+        requires_grad=True,
+    )
+    parameters = [weights]
+    pair_tensor = label_tensor = None
+    if has_pairs:
+        pair_tensor = torch.as_tensor(
+            pair_matrix, dtype=torch.float32, device=selected_device
+        )
+        label_tensor = torch.as_tensor(
+            pair_targets, dtype=torch.float32, device=selected_device
+        )
+
+    rating_tensor = value_tensor = threshold_start = gap_logits = None
+    minimum_gap = 1e-3
+    if has_ratings:
+        rating_tensor = torch.as_tensor(
+            ordinal_matrix, dtype=torch.float32, device=selected_device
+        )
+        value_tensor = torch.as_tensor(
+            ordinal_targets, dtype=torch.int64, device=selected_device
+        )
+        initial = _initial_ordinal_thresholds(ordinal_targets)
+        threshold_start = torch.tensor(
+            float(initial[0]),
+            dtype=torch.float32,
+            device=selected_device,
+            requires_grad=True,
+        )
+        gaps = np.maximum(np.diff(initial) - minimum_gap, 1e-4)
+        raw_gaps = np.log(np.expm1(gaps)).astype(np.float32)
+        gap_logits = torch.tensor(
+            raw_gaps,
+            dtype=torch.float32,
+            device=selected_device,
+            requires_grad=True,
+        )
+        parameters.extend((threshold_start, gap_logits))
+
+    def ordered_thresholds() -> Any:
+        assert threshold_start is not None and gap_logits is not None
+        gaps = torch.nn.functional.softplus(gap_logits) + minimum_gap
+        return torch.cat((threshold_start.reshape(1), threshold_start + torch.cumsum(gaps, 0)))
+
+    optimizer = torch.optim.Adam(parameters, lr=learning_rate)
+    final_loss = None
+    final_pair_loss = final_ordinal_loss = None
+    levels = None
+    if has_ratings:
+        levels = torch.arange(
+            1,
+            ORDINAL_LEVELS,
+            dtype=torch.int64,
+            device=selected_device,
+        )
+    for _ in range(epochs):
+        optimizer.zero_grad(set_to_none=True)
+        source_losses = []
+        source_weights = []
+        if has_pairs:
+            assert pair_tensor is not None and label_tensor is not None
+            final_pair_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                pair_tensor @ weights, label_tensor
+            )
+            source_losses.append(final_pair_loss)
+            source_weights.append(pairwise_weight)
+        if has_ratings:
+            assert rating_tensor is not None and value_tensor is not None and levels is not None
+            cumulative_targets = (value_tensor[:, None] > levels[None, :]).to(
+                dtype=torch.float32
+            )
+            logits = rating_tensor @ weights
+            final_ordinal_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                logits[:, None] - ordered_thresholds()[None, :], cumulative_targets
+            )
+            source_losses.append(final_ordinal_loss)
+            source_weights.append(ordinal_weight)
+        data_loss = sum(
+            loss * weight for loss, weight in zip(source_losses, source_weights)
+        ) / sum(source_weights)
+        final_loss = data_loss + 0.5 * l2 * torch.sum(weights.square())
+        final_loss.backward()
+        optimizer.step()
+
+    assert final_loss is not None
+    threshold_values = None
+    if has_ratings:
+        threshold_values = (
+            ordered_thresholds().detach().cpu().numpy().astype(np.float32, copy=False)
+        )
+    return JointPreferenceFit(
+        weights=weights.detach().cpu().numpy().astype(np.float32, copy=False),
+        ordinal_thresholds=threshold_values,
+        objective=float(final_loss.detach().cpu()),
+        pairwise_loss=(
+            float(final_pair_loss.detach().cpu()) if final_pair_loss is not None else None
+        ),
+        ordinal_loss=(
+            float(final_ordinal_loss.detach().cpu())
+            if final_ordinal_loss is not None
+            else None
+        ),
+    )
+
+
 def fit_bradley_terry(
     features: np.ndarray,
     labels: np.ndarray,
@@ -498,6 +916,11 @@ def save_preference_head(head: PreferenceHead, path: Path) -> Path:
             np.savez_compressed(
                 output,
                 weights=np.asarray(head.weights, dtype="<f4"),
+                ordinal_thresholds=(
+                    np.asarray(head.ordinal_thresholds, dtype="<f4")
+                    if head.ordinal_thresholds is not None
+                    else np.empty(0, dtype="<f4")
+                ),
                 metadata=np.asarray(json.dumps(metadata, sort_keys=True)),
             )
         temporary.replace(target)
@@ -512,6 +935,11 @@ def load_preference_head(path: Path) -> PreferenceHead:
     try:
         with np.load(target, allow_pickle=False) as artifact:
             weights = np.asarray(artifact["weights"], dtype=np.float32)
+            thresholds = (
+                np.asarray(artifact["ordinal_thresholds"], dtype=np.float32)
+                if "ordinal_thresholds" in artifact.files
+                else np.empty(0, dtype=np.float32)
+            )
             metadata = json.loads(str(artifact["metadata"].item()))
     except (FileNotFoundError, OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"could not load preference model artifact {target}: {exc}") from exc
@@ -519,7 +947,12 @@ def load_preference_head(path: Path) -> PreferenceHead:
     dimensions = metadata.pop("dimensions", None)
     if not isinstance(encoder, str) or dimensions != weights.size:
         raise RuntimeError(f"preference model artifact {target} has invalid metadata")
-    return PreferenceHead(weights=weights, encoder=encoder, metadata=metadata)
+    return PreferenceHead(
+        weights=weights,
+        encoder=encoder,
+        metadata=metadata,
+        ordinal_thresholds=thresholds if thresholds.size else None,
+    )
 
 
 def _artifact_path(models_dir_or_artifact: Path) -> Path:
@@ -781,19 +1214,27 @@ def train(
 __all__ = [
     "ENCODER",
     "ImageScorer",
+    "JointPreferenceFit",
     "MLDependencyError",
+    "ORDINAL_LEVELS",
+    "MIN_RATINGS",
     "PreferenceHead",
     "binary_metrics",
+    "build_ordinal_dataset",
     "build_pairwise_dataset",
     "chronological_group_split",
     "deserialize_embedding",
     "encode_paths",
     "ensure_cached_embeddings",
     "fit_bradley_terry",
+    "fit_joint_preference",
+    "fit_ordinal_thresholds",
     "load_cached_embeddings",
     "load_preference_head",
     "load_scorer",
     "maybe_load_scorer",
+    "ordinal_metrics",
+    "ordinal_probabilities",
     "pair_prediction",
     "preference_uncertainty",
     "preferred_device",

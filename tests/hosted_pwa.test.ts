@@ -56,17 +56,27 @@ test("hosted ranking is an immersive surface with direct collection access", asy
   assert.match(styles, /\.hosted-rank-view\s*\{[\s\S]*?height:\s*100dvh[\s\S]*?overflow:\s*hidden/);
 });
 
-test("hosted ranking keeps all text off the visual comparison surface", async () => {
+test("hosted ranking uses one photograph and an accessible five-dot scale", async () => {
   const [component, styles] = await Promise.all([
     readFile(new URL("../components/lumen-app.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
 
-  assert.doesNotMatch(component, /className="candidate-(?:number|caption|title|credit)"/);
-  assert.doesNotMatch(component, /className="(?:key-chip|focus-label|instruction-bar|rank-session-status)"/);
-  assert.doesNotMatch(component, /<div className="versus"[^>]*>\s*<span/);
+  assert.match(component, /const RATING_VALUES = \[1, 2, 3, 4, 5\] as const/);
+  assert.match(component, /requestJson<RatingResponse>\(path\)/);
+  assert.match(component, /\}\>\("\/api\/ratings", \{/);
+  assert.match(component, /aria-label=\{`Rate \$\{value\} out of 5`\}/);
+  assert.match(component, /aria-keyshortcuts=\{String\(value\)\}/);
+  assert.match(component, /className="rating-gesture-surface"/);
+  assert.match(component, /onUnavailable=\{onUnavailable\}/);
+  assert.match(component, /setRatingState\("error"\)/);
+  assert.doesNotMatch(component, /\/api\/pair|\/api\/comparisons|comparisonToken/);
+  assert.doesNotMatch(component, /className="(?:candidate|versus|instruction-bar|rank-session-status)"/);
   assert.match(component, /className="visually-hidden">Lumen</);
   assert.match(component, /className="visually-hidden">Skip</);
   assert.match(component, /className="visually-hidden">Ranked list</);
+  assert.match(styles, /\.rating-photo img\s*\{[\s\S]*?object-fit:\s*contain/);
+  assert.match(styles, /\.rating-scale\s*\{[\s\S]*?position:\s*absolute/);
+  assert.match(styles, /\.rating-value\s*\{[\s\S]*?width:\s*42px[\s\S]*?height:\s*42px/);
   assert.match(styles, /\.hosted-rank-view \.account-avatar\s*\{[\s\S]*?font-size:\s*0/);
 });

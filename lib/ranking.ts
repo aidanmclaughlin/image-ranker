@@ -6,7 +6,14 @@ import {
   createComparisonToken,
   isComparisonToken,
 } from "@/lib/comparison-token";
+import {
+  RATING_TOKEN_TTL_MS,
+  createRatingToken,
+  isRatingToken,
+  ratingTokenDigest,
+} from "@/lib/rating-token";
 import { query } from "@/lib/db";
+import { normalizedRatingReward } from "@/lib/rating-contract";
 import {
   ANCHOR_MIX_RATE,
   isAnchorBridgePair,
@@ -16,6 +23,8 @@ import type {
   ComparisonInput,
   ComparisonResult,
   RankedImageRow,
+  RatingInput,
+  RatingResult,
   StatsResponse,
 } from "@/lib/types";
 
@@ -45,6 +54,12 @@ interface ComparisonResultRow {
   replayed: boolean;
 }
 
+interface RatingResultRow {
+  point_rating: number;
+  point_rated_at: string | Date;
+  replayed: boolean;
+}
+
 interface CountRow {
   count: number | string;
 }
@@ -55,6 +70,13 @@ export class InvalidComparisonError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "InvalidComparisonError";
+  }
+}
+
+export class InvalidRatingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidRatingError";
   }
 }
 
@@ -190,7 +212,8 @@ export async function nextPair(
   const images = await query<RankedImageRow>`
     SELECT image.id, image.filename, image.source_url, image.page_url,
            image.title, image.creator, image.license, image.width, image.height,
-           ui.elo, ui.matches, ui.wins, ui.losses, ui.predicted_utility
+           ui.elo, ui.matches, ui.wins, ui.losses, ui.predicted_utility,
+           ui.point_rating, ui.point_rated_at
       FROM user_images AS ui
       JOIN images AS image ON image.id = ui.image_id
      WHERE ui.user_id = ${userId}
@@ -321,18 +344,151 @@ export async function issueComparisonToken(
   return token;
 }
 
+export async function nextRatingImage(
+  userId: string,
+  excludeId: number | null = null,
+): Promise<RankedImageRow | null> {
+  if (
+    excludeId !== null &&
+    (!Number.isSafeInteger(excludeId) || excludeId <= 0)
+  ) {
+    throw new InvalidRatingError("excludeId must be a positive integer");
+  }
+  const images = await query<RankedImageRow>`
+    SELECT image.id, image.filename, image.source_url, image.page_url,
+           image.title, image.creator, image.license, image.width, image.height,
+           ui.elo, ui.matches, ui.wins, ui.losses, ui.predicted_utility,
+           ui.point_rating, ui.point_rated_at
+      FROM user_images AS ui
+      JOIN images AS image ON image.id = ui.image_id
+      LEFT JOIN LATERAL (
+        SELECT MAX(issuance.issued_at) AS last_issued_at
+          FROM rating_issuances AS issuance
+         WHERE issuance.user_id = ui.user_id
+           AND issuance.image_id = ui.image_id
+      ) AS issuance_history ON TRUE
+     WHERE ui.user_id = ${userId}
+       AND ui.active
+       AND image.active
+       AND ui.point_rating IS NULL
+       AND (${excludeId}::INTEGER IS NULL OR ui.image_id <> ${excludeId})
+     ORDER BY issuance_history.last_issued_at ASC NULLS FIRST,
+              ui.discovered_at DESC, ui.image_id DESC
+     LIMIT 1`;
+  return images[0] ?? null;
+}
+
+export async function issueRatingToken(
+  userId: string,
+  imageId: number,
+  now = new Date(),
+): Promise<string> {
+  if (!Number.isSafeInteger(imageId) || imageId <= 0) {
+    throw new InvalidRatingError("Cannot issue a token for an invalid image");
+  }
+  await query`
+    WITH stale AS (
+      (
+        SELECT token_hash
+          FROM rating_issuances
+         WHERE user_id = ${userId}
+           AND used_at IS NULL
+           AND expires_at < NOW()
+         ORDER BY expires_at
+         LIMIT 128
+      )
+      UNION
+      (
+        SELECT token_hash
+          FROM rating_issuances
+         WHERE user_id = ${userId}
+           AND used_at < NOW() - INTERVAL '7 days'
+         ORDER BY used_at
+         LIMIT 128
+      )
+    )
+    DELETE FROM rating_issuances AS issuance
+     USING stale
+     WHERE issuance.token_hash = stale.token_hash`;
+  const token = createRatingToken();
+  const digest = ratingTokenDigest(token);
+  const expiresAt = new Date(now.getTime() + RATING_TOKEN_TTL_MS);
+  try {
+    await query`
+      INSERT INTO rating_issuances(
+        token_hash, user_id, image_id, issued_at, expires_at
+      ) VALUES (${digest}, ${userId}, ${imageId}, ${now}, ${expiresAt})`;
+  } catch (error) {
+    const databaseError = error as { code?: string; message?: string };
+    if (databaseError.code === "23503") {
+      throw new InvalidRatingError("Image must exist in the user library");
+    }
+    throw error;
+  }
+  return token;
+}
+
+export async function recordRating(
+  userId: string,
+  input: RatingInput,
+): Promise<RatingResult> {
+  const { imageId, value, ratingToken } = input;
+  if (
+    !Number.isSafeInteger(imageId) ||
+    imageId <= 0 ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > 5
+  ) {
+    throw new InvalidRatingError("Rating must be between 1 and 5");
+  }
+  if (!isRatingToken(ratingToken)) {
+    throw new InvalidRatingError("A valid rating token is required");
+  }
+  const idempotencyKey = ratingTokenDigest(ratingToken);
+
+  try {
+    const rows = await query<RatingResultRow>`
+      SELECT point_rating, point_rated_at, replayed
+        FROM record_user_rating(
+          ${userId}, ${imageId}, ${value}, ${idempotencyKey}
+        )`;
+    const result = rows[0];
+    if (!result) throw new Error("Rating did not return the saved value");
+    return {
+      imageId,
+      value: result.point_rating,
+      normalizedReward: normalizedRatingReward(result.point_rating),
+      pointRating: result.point_rating,
+      pointRatedAt:
+        result.point_rated_at instanceof Date
+          ? result.point_rated_at.toISOString()
+          : result.point_rated_at,
+      replayed: result.replayed,
+    };
+  } catch (error) {
+    const databaseError = error as { code?: string; message?: string };
+    if (databaseError.code === "22023") {
+      throw new InvalidRatingError(databaseError.message ?? "Invalid rating");
+    }
+    throw error;
+  }
+}
+
 export async function getStats(userId: string): Promise<StatsResponse> {
-  const [imageRows, comparisonRows] = await Promise.all([
+  const [imageRows, comparisonRows, ratingRows] = await Promise.all([
     query<CountRow>`
       SELECT COUNT(*) AS count
         FROM user_images AS ui
         JOIN images AS image ON image.id = ui.image_id
        WHERE ui.user_id = ${userId} AND ui.active AND image.active`,
     query<CountRow>`SELECT COUNT(*) AS count FROM comparisons WHERE user_id = ${userId}`,
+    query<CountRow>`SELECT COUNT(*) AS count FROM image_ratings WHERE user_id = ${userId}`,
   ]);
   return {
     images: Number(imageRows[0]?.count ?? 0),
     comparisons: Number(comparisonRows[0]?.count ?? 0),
+    ratings: Number(ratingRows[0]?.count ?? 0),
   };
 }
 
@@ -343,13 +499,16 @@ export async function getLeaderboard(
   return query<RankedImageRow>`
     SELECT image.id, image.filename, image.source_url, image.page_url,
            image.title, image.creator, image.license, image.width, image.height,
-           ui.elo, ui.matches, ui.wins, ui.losses, ui.predicted_utility
+           ui.elo, ui.matches, ui.wins, ui.losses, ui.predicted_utility,
+           ui.point_rating, ui.point_rated_at
       FROM user_images AS ui
       JOIN images AS image ON image.id = ui.image_id
      WHERE ui.user_id = ${userId}
        AND ui.active
        AND image.active
-       AND ui.matches > 0
-     ORDER BY ui.elo DESC, ui.matches DESC, image.id
+       AND (ui.point_rating IS NOT NULL OR ui.matches > 0)
+     ORDER BY ui.point_rating DESC NULLS LAST,
+              ui.predicted_utility DESC NULLS LAST,
+              ui.elo DESC, ui.matches DESC, image.id
      LIMIT ${limit}`;
 }

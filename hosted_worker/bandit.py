@@ -7,57 +7,27 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from image_ranker.ml import (
-    PreferenceHead,
-    deserialize_embedding,
-    sigmoid,
-)
+from image_ranker.ml import PreferenceHead
 
 from .encoder import hosted_encoder_id
 
 
-POLICY_VERSION = "discounted-exp3-ix-v1"
+POLICY_VERSION = "direct-rating-exp3-ix-v2"
 POLICY_DISCOUNT = 0.995
 SOURCE_EXPLORATION_FRACTION = 0.20
 MAX_HISTORY_ACTIONS = 4_096
-MIN_REWARD_MODEL_COMPARISONS = 40
-MIN_ANCHORS = 4
-MAX_ANCHORS = 8
-MIN_HUMAN_MATCHES = 3
-FULL_HUMAN_MATCHES = 8
-ENSEMBLE_LOWER_QUANTILE = 0.10
+MIN_TASTE_MODEL_FEEDBACK = 40
 
 
 @dataclass(frozen=True)
 class RewardContext:
+    """An optional shared taste head used only to pre-screen crawl candidates."""
+
     model_run_id: int
     comparison_count: int
+    rating_count: int
+    feedback_count: int
     head: PreferenceHead
-    ensemble_weights: np.ndarray
-    anchor_ids: tuple[int, ...]
-    anchor_elos: tuple[float, ...]
-    anchor_embeddings: np.ndarray
-
-    def __post_init__(self) -> None:
-        ensemble = np.asarray(self.ensemble_weights, dtype=np.float32)
-        anchors = np.asarray(self.anchor_embeddings, dtype=np.float32)
-        if ensemble.ndim != 2 or ensemble.shape[1] != self.head.dimensions:
-            raise ValueError("reward-model ensemble has incompatible dimensions")
-        if anchors.ndim != 2 or anchors.shape != (
-            len(self.anchor_ids),
-            self.head.dimensions,
-        ):
-            raise ValueError("reward anchors have incompatible dimensions")
-        if len(self.anchor_elos) != len(self.anchor_ids) or not all(
-            math.isfinite(value) for value in self.anchor_elos
-        ):
-            raise ValueError("reward anchor Elo values are incompatible")
-        if len(self.anchor_ids) < MIN_ANCHORS:
-            raise ValueError("reward context has too few human-ranked anchors")
-        if not np.isfinite(ensemble).all() or not np.isfinite(anchors).all():
-            raise ValueError("reward context contains non-finite values")
-        object.__setattr__(self, "ensemble_weights", ensemble.copy())
-        object.__setattr__(self, "anchor_embeddings", anchors.copy())
 
 
 @dataclass(frozen=True)
@@ -80,65 +50,39 @@ class BanditDecision:
     probabilities: Mapping[str, float]
 
 
-def anchor_relative_reward(context: RewardContext, embedding: np.ndarray) -> float:
-    """Pessimistic P(candidate beats a random human-ranked top anchor)."""
-    vector = np.asarray(embedding, dtype=np.float32)
-    if vector.shape != (context.head.dimensions,) or not np.isfinite(vector).all():
-        raise ValueError("candidate embedding has incompatible dimensions")
-    candidate_scores = context.ensemble_weights @ vector
-    anchor_scores = context.ensemble_weights @ context.anchor_embeddings.T
-    per_model = np.mean(
-        sigmoid(candidate_scores[:, np.newaxis] - anchor_scores),
-        axis=1,
-    )
-    reward = float(np.quantile(per_model, ENSEMBLE_LOWER_QUANTILE))
-    if not math.isfinite(reward):
-        raise RuntimeError("reward model produced a non-finite crawler reward")
-    return min(1.0, max(0.0, reward))
-
-
-def human_anchor_reward(candidate_elo: float, anchor_elos: Sequence[float]) -> float:
-    """Expected Elo score against a ladder of current human-ranked anchors."""
-    if not math.isfinite(candidate_elo):
-        raise ValueError("candidate Elo must be finite")
-    anchors = [float(value) for value in anchor_elos]
-    if not anchors or not all(math.isfinite(value) for value in anchors):
-        raise ValueError("at least one finite anchor Elo is required")
-    probabilities = [
-        1.0 / (1.0 + 10.0 ** ((anchor - candidate_elo) / 400.0))
-        for anchor in anchors
-    ]
-    return float(sum(probabilities) / len(probabilities))
-
-
-def blend_human_reward(
-    proxy_reward: float,
-    human_reward: float,
-    matches: int,
-) -> float:
-    """Let delayed human evidence replace the proxy only as it accumulates."""
-    if not 0 <= proxy_reward <= 1 or not 0 <= human_reward <= 1:
-        raise ValueError("crawler rewards must be in [0, 1]")
-    if matches < 0:
-        raise ValueError("match count cannot be negative")
-    if matches < MIN_HUMAN_MATCHES:
-        return proxy_reward
-    confidence = min(1.0, matches / FULL_HUMAN_MATCHES)
-    return (1.0 - confidence) * proxy_reward + confidence * human_reward
+def rating_reward(value: Any) -> float:
+    """Map an explicit 1--5 human rating onto EXP3's [0, 1] reward."""
+    if isinstance(value, bool):
+        raise ValueError("human rating must be an integer from 1 to 5")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("human rating must be an integer from 1 to 5") from exc
+    if not math.isfinite(numeric) or not numeric.is_integer() or not 1 <= numeric <= 5:
+        raise ValueError("human rating must be an integer from 1 to 5")
+    return (int(numeric) - 1) / 4.0
 
 
 def action_outcome(
-    candidate_rewards: Sequence[float],
+    imported_count: int,
     *,
+    eligible_count: int,
     resource_censored: bool,
 ) -> tuple[str, float | None]:
-    """Score every fully evaluated action; censor only truncated observations."""
-    rewards = [float(value) for value in candidate_rewards]
-    if any(not math.isfinite(value) or not 0 <= value <= 1 for value in rewards):
-        raise ValueError("candidate rewards must be finite values in [0, 1]")
-    if resource_censored:
+    """Resolve direct feedback without treating a taste score as a reward."""
+    if isinstance(imported_count, bool) or not isinstance(imported_count, int):
+        raise ValueError("bandit imported count must be an integer")
+    if imported_count < 0 or imported_count > 1:
+        raise ValueError("a source action may import at most one image")
+    if isinstance(eligible_count, bool) or not isinstance(eligible_count, int):
+        raise ValueError("bandit eligible count must be an integer")
+    if eligible_count < imported_count:
+        raise ValueError("bandit eligible count cannot be smaller than imports")
+    if resource_censored or (eligible_count > 0 and imported_count == 0):
         return "censored", None
-    return "observed", max(rewards, default=0.0)
+    if imported_count == 0:
+        return "observed", 0.0
+    return "observed", None
 
 
 def _learning_rate(arm_count: int, round_number: int) -> float:
@@ -152,7 +96,7 @@ def exp3_ix_log_weights(
     arms: Sequence[str],
     history: Sequence[BanditObservation],
 ) -> dict[str, float]:
-    """Replay bounded delayed feedback into a discounted EXP3-IX policy."""
+    """Replay bounded, direct human feedback into discounted EXP3-IX."""
     ordered = tuple(arms)
     if not ordered or len(set(ordered)) != len(ordered):
         raise ValueError("bandit arms must be unique and non-empty")
@@ -180,7 +124,7 @@ def exp3_ix_probabilities(
     *,
     available: Sequence[str] | None = None,
 ) -> dict[str, float]:
-    """Return the exact behavior distribution including uniform exploration."""
+    """Return the exact behavior distribution, uniform before any ratings."""
     ordered = tuple(arms)
     log_weights = exp3_ix_log_weights(ordered, history)
     active = tuple(ordered if available is None else available)
@@ -238,18 +182,20 @@ def observation_from_row(row: Mapping[str, Any]) -> BanditObservation:
 
 
 def load_reward_context(connection: Any, user_id: str) -> RewardContext | None:
+    """Load one optional taste head without making it part of source policy."""
     encoder = hosted_encoder_id()
     with connection.cursor() as cursor:
         cursor.execute(
-            """SELECT id, comparison_count, weights_json
+            """SELECT id, comparison_count, rating_count, feedback_count,
+                      weights_json
                  FROM model_runs
                 WHERE user_id=%s
-                  AND comparison_count >= %s
+                  AND feedback_count >= %s
                   AND promoted
                   AND encoder=%s
-                ORDER BY comparison_count DESC, id DESC
+                ORDER BY feedback_count DESC, id DESC
                 LIMIT 1""",
-            (user_id, MIN_REWARD_MODEL_COMPARISONS, encoder),
+            (user_id, MIN_TASTE_MODEL_FEEDBACK, encoder),
         )
         model_row = cursor.fetchone()
     if model_row is None:
@@ -257,162 +203,85 @@ def load_reward_context(connection: Any, user_id: str) -> RewardContext | None:
     value = model_row["weights_json"] or {}
     if not isinstance(value, Mapping):
         raise RuntimeError("latest hosted preference weights are malformed")
+    comparison_count = int(model_row["comparison_count"])
+    rating_count = int(model_row["rating_count"])
+    feedback_count = int(model_row["feedback_count"])
+    if (
+        comparison_count < 0
+        or rating_count < 0
+        or feedback_count != comparison_count + rating_count
+    ):
+        raise RuntimeError("latest hosted preference feedback counts are inconsistent")
     weights = np.asarray(value.get("weights"), dtype=np.float32)
-    if value.get("encoder") != encoder or value.get("dimensions") != weights.size:
+    if (
+        weights.ndim != 1
+        or not weights.size
+        or not np.isfinite(weights).all()
+        or value.get("encoder") != encoder
+        or value.get("dimensions") != weights.size
+    ):
         raise RuntimeError("latest hosted preference weights use an incompatible encoder")
-    raw_ensemble = value.get("ensemble_weights")
-    ensemble = np.asarray(
-        raw_ensemble if isinstance(raw_ensemble, list) else [weights],
-        dtype=np.float32,
+    raw_thresholds = value.get("ordinal_thresholds")
+    thresholds = (
+        np.asarray(raw_thresholds, dtype=np.float32)
+        if raw_thresholds is not None
+        else None
     )
-    if ensemble.ndim != 2 or ensemble.shape[1] != weights.size:
-        raise RuntimeError("latest hosted preference ensemble is malformed")
-
-    with connection.cursor() as cursor:
-        cursor.execute(
-            """SELECT ui.image_id, ui.elo, embedding.vector, embedding.dimensions
-                 FROM user_images AS ui
-                 JOIN images AS image ON image.id=ui.image_id
-                 JOIN embeddings AS embedding ON embedding.image_id=ui.image_id
-                WHERE ui.user_id=%s AND ui.active AND image.active
-                  AND ui.matches >= %s
-                  AND embedding.encoder=%s
-                ORDER BY ui.elo DESC, ui.matches DESC, ui.image_id
-                LIMIT %s""",
-            (user_id, MIN_HUMAN_MATCHES, encoder, MAX_ANCHORS),
+    try:
+        head = PreferenceHead(
+            weights,
+            encoder=encoder,
+            ordinal_thresholds=thresholds,
         )
-        anchor_rows = list(cursor.fetchall())
-    if len(anchor_rows) < MIN_ANCHORS:
-        return None
-    anchor_ids = tuple(int(row["image_id"]) for row in anchor_rows)
-    anchor_elos = tuple(float(row["elo"]) for row in anchor_rows)
-    anchor_embeddings = np.stack(
-        [
-            deserialize_embedding(bytes(row["vector"]), int(row["dimensions"]))
-            for row in anchor_rows
-        ]
-    )
+    except ValueError as exc:
+        raise RuntimeError(
+            "latest hosted preference ordinal thresholds are malformed"
+        ) from exc
     return RewardContext(
         model_run_id=int(model_row["id"]),
-        comparison_count=int(model_row["comparison_count"]),
-        head=PreferenceHead(weights, encoder=encoder),
-        ensemble_weights=ensemble,
-        anchor_ids=anchor_ids,
-        anchor_elos=anchor_elos,
-        anchor_embeddings=anchor_embeddings,
+        comparison_count=comparison_count,
+        rating_count=rating_count,
+        feedback_count=feedback_count,
+        head=head,
     )
-
-
-def _action_human_feedback(
-    proxy_reward: float,
-    anchor_ids: Sequence[int],
-    anchor_elos: Mapping[int, float],
-    discoveries: Sequence[Mapping[str, Any]],
-) -> tuple[float, int, float] | None:
-    """Correct the exact imported candidate that defined an action reward."""
-    if not discoveries:
-        raise ValueError("an observed bandit action must have a discovery")
-    imported_max = max(float(row["candidate_proxy_reward"]) for row in discoveries)
-    if imported_max > proxy_reward and not math.isclose(
-        imported_max,
-        proxy_reward,
-        rel_tol=0.0,
-        abs_tol=1e-12,
-    ):
-        raise RuntimeError("an imported candidate exceeds its action reward")
-    matching_winners = [
-        row
-        for row in discoveries
-        if math.isclose(
-            float(row["candidate_proxy_reward"]),
-            proxy_reward,
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        )
-    ]
-    if not matching_winners:
-        return None
-    reward_winner = min(matching_winners, key=lambda row: int(row["image_id"]))
-    matches = int(reward_winner["matches"])
-    if matches < MIN_HUMAN_MATCHES:
-        return None
-    ordered_anchor_elos: list[float] = []
-    for raw_anchor_id in anchor_ids:
-        anchor_id = int(raw_anchor_id)
-        value = anchor_elos.get(anchor_id)
-        if value is None:
-            return None
-        ordered_anchor_elos.append(float(value))
-    human_reward = human_anchor_reward(
-        float(reward_winner["elo"]),
-        ordered_anchor_elos,
-    )
-    effective = blend_human_reward(proxy_reward, human_reward, matches)
-    return human_reward, matches, effective
 
 
 def refresh_human_feedback(connection: Any, user_id: str) -> int:
-    """Refresh delayed human corrections without creating preference labels."""
+    """Apply immutable point ratings that were not already propagated."""
     with connection.cursor() as cursor:
         cursor.execute(
-            """SELECT action.id AS action_id, action.proxy_reward,
-                      action.anchor_image_ids, discovery.image_id,
-                      discovery.candidate_proxy_reward, ui.elo, ui.matches
+            """SELECT action.id AS action_id, rating.value
                  FROM crawl_bandit_actions AS action
                  JOIN crawl_bandit_discoveries AS discovery
                    ON discovery.user_id=action.user_id
                   AND discovery.action_id=action.id
-                 JOIN user_images AS ui
-                   ON ui.user_id=discovery.user_id
-                  AND ui.image_id=discovery.image_id
+                 JOIN image_ratings AS rating
+                   ON rating.user_id=discovery.user_id
+                  AND rating.image_id=discovery.image_id
                 WHERE action.user_id=%s
+                  AND action.policy_version=%s
                   AND action.status='observed'
-                  AND action.proxy_reward IS NOT NULL
-                ORDER BY action.id, discovery.image_id""",
-            (user_id,),
+                  AND action.effective_reward IS NULL
+                ORDER BY action.id""",
+            (user_id, POLICY_VERSION),
         )
         rows = list(cursor.fetchall())
-    grouped: dict[int, list[Mapping[str, Any]]] = {}
+    updates: list[tuple[float, int, float, int, str, str]] = []
+    seen_actions: set[int] = set()
     for row in rows:
-        grouped.setdefault(int(row["action_id"]), []).append(row)
-    stored_anchor_ids = sorted(
-        {
-            int(anchor_id)
-            for row in rows
-            for anchor_id in row["anchor_image_ids"]
-        }
-    )
-    anchor_elos: dict[int, float] = {}
-    if stored_anchor_ids:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """SELECT image_id, elo
-                     FROM user_images
-                    WHERE user_id=%s AND image_id=ANY(%s)""",
-                (user_id, stored_anchor_ids),
-            )
-            anchor_elos = {
-                int(row["image_id"]): float(row["elo"])
-                for row in cursor.fetchall()
-            }
-    updates: list[tuple[float, int, float, int, str]] = []
-    for action_id, discoveries in grouped.items():
-        proxy_reward = float(discoveries[0]["proxy_reward"])
-        feedback = _action_human_feedback(
-            proxy_reward,
-            tuple(int(value) for value in discoveries[0]["anchor_image_ids"]),
-            anchor_elos,
-            discoveries,
-        )
-        if feedback is not None:
-            human_reward, matches, effective = feedback
-            updates.append((human_reward, matches, effective, action_id, user_id))
+        action_id = int(row["action_id"])
+        if action_id in seen_actions:
+            raise RuntimeError("a source action has more than one imported image")
+        seen_actions.add(action_id)
+        reward = rating_reward(row["value"])
+        updates.append((reward, 1, reward, action_id, user_id, POLICY_VERSION))
     if updates:
         with connection.cursor() as cursor:
             cursor.executemany(
                 """UPDATE crawl_bandit_actions
                       SET human_reward=%s, human_matches=%s, effective_reward=%s
-                    WHERE id=%s AND user_id=%s AND status='observed'""",
+                    WHERE id=%s AND user_id=%s AND policy_version=%s
+                      AND status='observed' AND effective_reward IS NULL""",
                 updates,
             )
         connection.commit()
@@ -433,13 +302,14 @@ def load_action_history(
                  FROM (
                    SELECT id, arm, propensity, effective_reward
                      FROM crawl_bandit_actions
-                    WHERE user_id=%s AND status='observed'
+                    WHERE user_id=%s AND policy_version=%s
+                      AND status='observed'
                       AND effective_reward IS NOT NULL
                     ORDER BY id DESC
                     LIMIT %s
                  ) AS recent
                 ORDER BY id""",
-            (user_id, limit),
+            (user_id, POLICY_VERSION, limit),
         )
         rows = list(cursor.fetchall())
     return [observation_from_row(row) for row in rows]
@@ -452,11 +322,36 @@ def start_action(
     worker_job_id: int,
     action_index: int,
     decision: BanditDecision,
-    context: RewardContext,
-    context_json: Mapping[str, Any],
+    context_json: Mapping[str, Any] | None = None,
+    context: RewardContext | None = None,
 ) -> int:
     from psycopg.types.json import Jsonb
 
+    if worker_job_id < 1 or action_index < 0:
+        raise ValueError("bandit actions require a durable job and non-negative index")
+    probabilities = {str(arm): float(value) for arm, value in decision.probabilities.items()}
+    if (
+        not probabilities
+        or any(not 0 < value <= 1 for value in probabilities.values())
+        or not math.isclose(sum(probabilities.values()), 1.0, abs_tol=1e-9)
+    ):
+        raise ValueError("bandit decision has an invalid probability distribution")
+    if decision.arm not in probabilities or not math.isclose(
+        decision.propensity,
+        probabilities[decision.arm],
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise ValueError("bandit decision propensity does not match its distribution")
+    logged_context = dict(context_json or {})
+    logged_context.update(
+        {
+            "probabilities": probabilities,
+            "selected_arm": decision.arm,
+            "selected_propensity": decision.propensity,
+            "taste_model_run_id": context.model_run_id if context is not None else None,
+        }
+    )
     with connection.cursor() as cursor:
         cursor.execute(
             """INSERT INTO crawl_bandit_actions(
@@ -471,9 +366,9 @@ def start_action(
                 decision.arm,
                 POLICY_VERSION,
                 decision.propensity,
-                context.model_run_id,
-                list(context.anchor_ids),
-                Jsonb(dict(context_json)),
+                context.model_run_id if context is not None else None,
+                [],
+                Jsonb(logged_context),
             ),
         )
         row = cursor.fetchone()
@@ -491,15 +386,31 @@ def finish_action(
     status: str,
     candidates_seen: int,
     candidates_eligible: int,
-    proxy_reward: float | None,
+    imported_count: int,
+    proxy_reward: float | None = None,
 ) -> None:
     if status not in {"observed", "censored", "failed"}:
         raise ValueError("invalid completed bandit action status")
     if candidates_seen < 0 or candidates_eligible < 0:
         raise ValueError("bandit candidate counts cannot be negative")
     if proxy_reward is not None and not 0 <= proxy_reward <= 1:
-        raise ValueError("bandit proxy reward must be in [0, 1]")
-    effective_reward = proxy_reward if status == "observed" else None
+        raise ValueError("bandit diagnostic taste score must be in [0, 1]")
+    if status == "observed":
+        resolved_status, effective_reward = action_outcome(
+            imported_count,
+            eligible_count=candidates_eligible,
+            resource_censored=False,
+        )
+        if resolved_status != status:
+            raise ValueError("an eligible unimported action must be censored")
+    else:
+        if isinstance(imported_count, bool) or not isinstance(imported_count, int):
+            raise ValueError("bandit imported count must be an integer")
+        if imported_count < 0 or imported_count > 1:
+            raise ValueError("a source action may import at most one image")
+        if candidates_eligible < imported_count:
+            raise ValueError("bandit eligible count cannot be smaller than imports")
+        effective_reward = None
     with connection.cursor() as cursor:
         cursor.execute(
             """UPDATE crawl_bandit_actions
@@ -526,44 +437,54 @@ def link_discovery(
     user_id: str,
     action_id: int,
     image_id: int,
-    proxy_reward: float,
+    proxy_reward: float | None = None,
 ) -> None:
+    """Link exactly one imported image; proxy_reward is diagnostic-only."""
+    diagnostic = None if proxy_reward is None else float(proxy_reward)
+    if diagnostic is not None and not 0 <= diagnostic <= 1:
+        raise ValueError("bandit diagnostic taste score must be in [0, 1]")
     with connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT id FROM crawl_bandit_actions
+                WHERE id=%s AND user_id=%s FOR UPDATE""",
+            (action_id, user_id),
+        )
+        if cursor.fetchone() is None:
+            raise RuntimeError("bandit action does not exist")
+        cursor.execute(
+            """SELECT image_id FROM crawl_bandit_discoveries
+                WHERE user_id=%s AND action_id=%s""",
+            (user_id, action_id),
+        )
+        if cursor.fetchone() is not None:
+            raise RuntimeError("a source action already has an imported image")
         cursor.execute(
             """INSERT INTO crawl_bandit_discoveries(
                  user_id,action_id,image_id,candidate_proxy_reward
-               ) VALUES (%s,%s,%s,%s)
-               ON CONFLICT(user_id,image_id) DO NOTHING""",
-            (user_id, action_id, image_id, proxy_reward),
+               ) VALUES (%s,%s,%s,%s)""",
+            (user_id, action_id, image_id, diagnostic),
         )
 
 
 __all__ = [
     "BanditDecision",
     "BanditObservation",
-    "ENSEMBLE_LOWER_QUANTILE",
-    "FULL_HUMAN_MATCHES",
-    "MAX_ANCHORS",
     "MAX_HISTORY_ACTIONS",
-    "MIN_ANCHORS",
-    "MIN_HUMAN_MATCHES",
-    "MIN_REWARD_MODEL_COMPARISONS",
+    "MIN_TASTE_MODEL_FEEDBACK",
     "POLICY_DISCOUNT",
     "POLICY_VERSION",
     "RewardContext",
     "SOURCE_EXPLORATION_FRACTION",
     "action_outcome",
-    "anchor_relative_reward",
-    "blend_human_reward",
     "choose_arm",
     "exp3_ix_log_weights",
     "exp3_ix_probabilities",
-    "human_anchor_reward",
     "finish_action",
     "link_discovery",
     "load_action_history",
     "load_reward_context",
     "observation_from_row",
+    "rating_reward",
     "refresh_human_feedback",
     "start_action",
 ]

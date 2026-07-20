@@ -51,6 +51,10 @@ function numericOutput(job: OperationsJob, key: string): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function counted(value: number, singular: string, plural: string): string {
+  return `${value.toLocaleString()} ${value === 1 ? singular : plural}`;
+}
+
 export function redactWorkerError(error: string | null): string | null {
   if (!error?.trim()) return null;
   return error
@@ -111,8 +115,38 @@ function successfulNote(job: OperationsJob): string {
     return "The current taste model was already trained and verified.";
   }
   const comparisons = numericOutput(job, "comparison_count");
-  if (comparisons === null) return "The latest taste model trained successfully.";
-  return `Model trained on ${comparisons.toLocaleString()} choices.`;
+  const ratings = numericOutput(job, "rating_count");
+  const reportedFeedback = numericOutput(job, "feedback_count");
+  if (comparisons === null && ratings === null) {
+    if (reportedFeedback === null) return "The latest taste model trained successfully.";
+    return `Model trained on ${counted(reportedFeedback, "feedback event", "feedback events")}.`;
+  }
+
+  const comparisonCount = comparisons ?? 0;
+  const ratingCount = ratings ?? 0;
+  const feedbackCount = reportedFeedback ?? comparisonCount + ratingCount;
+  const sources = [
+    ratingCount > 0 ? counted(ratingCount, "rating", "ratings") : null,
+    comparisonCount > 0
+      ? counted(comparisonCount, "legacy choice", "legacy choices")
+      : null,
+  ].filter((source): source is string => source !== null);
+  if (sources.length === 0) {
+    return `Model trained on ${counted(feedbackCount, "feedback event", "feedback events")}.`;
+  }
+  return `Model trained on ${sources.join(" and ")} (${counted(feedbackCount, "feedback event", "feedback events")} total).`;
+}
+
+function trainingCutoff(job: OperationsJob): [string, string] | null {
+  const comparisonCutoff = job.input_json.comparison_cutoff;
+  const ratingCutoff = job.input_json.rating_cutoff;
+  if (
+    (comparisonCutoff === null || comparisonCutoff === undefined) &&
+    (ratingCutoff === null || ratingCutoff === undefined)
+  ) {
+    return null;
+  }
+  return [String(comparisonCutoff ?? 0), String(ratingCutoff ?? 0)];
 }
 
 function retryCapReached(
@@ -123,16 +157,21 @@ function retryCapReached(
   if (latest.kind !== "train" || !["failed", "skipped"].includes(latest.status)) {
     return false;
   }
-  const cutoff = latest.input_json.comparison_cutoff;
-  if (cutoff === null || cutoff === undefined) return false;
+  const cutoff = trainingCutoff(latest);
+  if (cutoff === null) return false;
   const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
   return (
     jobs.filter(
-      (job) =>
-        job.kind === "train" &&
-        ["failed", "skipped"].includes(job.status) &&
-        timestamp(job.created_at) >= sevenDaysAgo &&
-        String(job.input_json.comparison_cutoff) === String(cutoff),
+      (job) => {
+        const jobCutoff = trainingCutoff(job);
+        return (
+          job.kind === "train" &&
+          ["failed", "skipped"].includes(job.status) &&
+          timestamp(job.created_at) >= sevenDaysAgo &&
+          jobCutoff?.[0] === cutoff[0] &&
+          jobCutoff[1] === cutoff[1]
+        );
+      },
     ).length >= 3
   );
 }
