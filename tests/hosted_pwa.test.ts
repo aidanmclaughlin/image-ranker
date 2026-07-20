@@ -40,3 +40,18 @@ test("service worker is public, root-scoped, and registered without HTTP cache",
   assert.match(config, /source: "\/sw\.js"/);
   assert.match(config, /no-cache, no-store, must-revalidate/);
 });
+
+test("hosted ranking is an immersive surface with direct collection access", async () => {
+  const [component, styles] = await Promise.all([
+    readFile(new URL("../components/lumen-app.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.doesNotMatch(component, /requestFullscreen|exitFullscreen|fullscreenchange/);
+  assert.doesNotMatch(component, />Fullscreen</);
+  assert.match(component, /className="rank-control-button rank-list-button"/);
+  assert.match(component, />Ranked list</);
+  assert.match(component, /className="view rank-view hosted-rank-view"/);
+  assert.match(styles, /\.rank-main\s*\{[\s\S]*?height:\s*100dvh[\s\S]*?padding-top:\s*0/);
+  assert.match(styles, /\.hosted-rank-view\s*\{[\s\S]*?height:\s*100dvh[\s\S]*?overflow:\s*hidden/);
+});

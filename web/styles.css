@@ -486,10 +486,6 @@ h1 em { color: var(--acid); font-weight: 400; }
   text-transform: uppercase;
 }
 
-.arena-wrap:fullscreen { padding: 24px; background: var(--ink); }
-.arena-wrap:fullscreen .arena { height: 100%; }
-.arena-wrap:fullscreen .empty-state { height: 100%; }
-
 .collection-view {
   min-height: calc(100dvh - var(--header-height) - env(safe-area-inset-top));
   padding: clamp(46px, 7vh, 92px) clamp(18px, 3.2vw, 54px) 100px;
@@ -673,7 +669,7 @@ h1 em { color: var(--acid); font-weight: 400; }
   .instruction-bar p { display: none; white-space: nowrap; }
   .instruction-bar .touch-hint { display: flex; color: var(--paper); letter-spacing: .06em; text-transform: uppercase; }
   .instruction-rule { display: none; }
-  .optional-instruction, .click-hint { display: none !important; }
+  .click-hint { display: none !important; }
   .collection-view { padding-bottom: 100px; }
   .collection-heading { align-items: start; display: block; }
   .collection-heading > p { width: min(100%, 380px); margin-top: 24px; }

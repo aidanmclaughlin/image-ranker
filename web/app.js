@@ -28,12 +28,10 @@
 
   const elements = {
     arena: document.querySelector("#arena"),
-    arenaWrap: document.querySelector("#arena-wrap"),
     empty: document.querySelector("#empty-state"),
     error: document.querySelector("#error-state"),
     retry: document.querySelector("#retry-button"),
     skip: document.querySelector("#skip-button"),
-    fullscreen: document.querySelector("#fullscreen-button"),
     imageCount: document.querySelector("#image-count"),
     choiceCount: document.querySelector("#choice-count"),
     sessionCount: document.querySelector("#session-count"),
@@ -650,15 +648,6 @@
     if (view === "collection" && state.connectionReady) loadGallery();
   }
 
-  async function toggleFullscreen() {
-    try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-      else await elements.arenaWrap.requestFullscreen();
-    } catch {
-      announce("Fullscreen could not be opened.");
-    }
-  }
-
   function handleKeydown(event) {
     if (currentView() !== "rank" || elements.lightbox.open) return;
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
@@ -677,10 +666,6 @@
       event.preventDefault();
       return;
     }
-    if (event.key.toLowerCase() === "f" && !event.metaKey && !event.ctrlKey && !event.altKey) {
-      toggleFullscreen();
-      event.preventDefault();
-    }
   }
 
   Object.entries(sides).forEach(([side, button]) => {
@@ -693,7 +678,6 @@
   });
   elements.retry.addEventListener("click", loadPair);
   elements.skip.addEventListener("click", skipPair);
-  elements.fullscreen.addEventListener("click", toggleFullscreen);
   elements.arena.addEventListener("touchstart", handleTouchStart, { passive: true });
   elements.arena.addEventListener("touchmove", handleTouchMove, { passive: false });
   elements.arena.addEventListener("touchend", handleTouchEnd, { passive: true });
@@ -708,12 +692,6 @@
   elements.lightbox.querySelector(".lightbox-close").addEventListener("click", () => elements.lightbox.close());
   elements.lightbox.addEventListener("click", (event) => {
     if (event.target === elements.lightbox) elements.lightbox.close();
-  });
-  document.addEventListener("fullscreenchange", () => {
-    const active = Boolean(document.fullscreenElement);
-    elements.fullscreen.setAttribute("aria-pressed", String(active));
-    elements.fullscreen.setAttribute("aria-label", active ? "Exit fullscreen comparison" : "Enter fullscreen comparison");
-    elements.fullscreen.querySelector("span").textContent = active ? "Exit fullscreen" : "Fullscreen";
   });
   document.addEventListener("keydown", handleKeydown);
   window.addEventListener("hashchange", showCurrentView);

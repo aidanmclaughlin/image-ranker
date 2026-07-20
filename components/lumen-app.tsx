@@ -391,10 +391,8 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
   const [jobsError, setJobsError] = useState("");
   const [toast, setToast] = useState("");
   const [lightbox, setLightbox] = useState<{ image: ImageRecord; rank: number } | null>(null);
-  const [fullscreen, setFullscreen] = useState(false);
   const [gesture, setGesture] = useState<Side | "skip" | null>(null);
 
-  const arenaWrap = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pairRequest = useRef(0);
@@ -580,20 +578,11 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
       } else if (event.key.toLowerCase() === "s") {
         event.preventDefault();
         skip();
-      } else if (event.key.toLowerCase() === "f") {
-        event.preventDefault();
-        void arenaWrap.current?.requestFullscreen();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [choose, focusCandidate, focused, skip, view]);
-
-  useEffect(() => {
-    const onFullscreen = () => setFullscreen(Boolean(document.fullscreenElement));
-    document.addEventListener("fullscreenchange", onFullscreen);
-    return () => document.removeEventListener("fullscreenchange", onFullscreen);
-  }, []);
 
   useEffect(() => {
     const node = dialog.current;
@@ -642,80 +631,73 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
       <a className="skip-link" href="#main">
         Skip to content
       </a>
-      <header className="site-header">
-        <button className="brand brand-button" type="button" onClick={() => selectView("rank")}>
-          <span className="brand-mark" aria-hidden="true" />
-          <span>Lumen</span>
-        </button>
-        <div className="header-stats" aria-label="Collection status">
-          <span className="cloud-status">
-            <span className="connection-dot" aria-hidden="true" /> Cloud private
-          </span>
-          <span>
-            <strong>{stats.images.toLocaleString()}</strong> images
-          </span>
-          <span className="stat-divider" aria-hidden="true" />
-          <span>
-            <strong>{stats.comparisons.toLocaleString()}</strong> choices
-          </span>
-          {accountMenu}
-        </div>
-      </header>
+      {view === "collection" ? (
+        <>
+          <header className="site-header">
+            <button className="brand brand-button" type="button" onClick={() => selectView("rank")}>
+              <span className="brand-mark" aria-hidden="true" />
+              <span>Lumen</span>
+            </button>
+            <div className="header-stats" aria-label="Collection status">
+              <span className="cloud-status">
+                <span className="connection-dot" aria-hidden="true" /> Cloud private
+              </span>
+              <span>
+                <strong>{stats.images.toLocaleString()}</strong> images
+              </span>
+              <span className="stat-divider" aria-hidden="true" />
+              <span>
+                <strong>{stats.comparisons.toLocaleString()}</strong> choices
+              </span>
+              {accountMenu}
+            </div>
+          </header>
 
-      <nav className="site-nav" aria-label="Primary">
-        <button
-          className={`nav-link${view === "rank" ? " is-active" : ""}`}
-          type="button"
-          onClick={() => selectView("rank")}
-        >
-          Rank
-        </button>
-        <button
-          className={`nav-link${view === "collection" ? " is-active" : ""}`}
-          type="button"
-          onClick={() => selectView("collection")}
-        >
-          Collection
-        </button>
-      </nav>
+          <nav className="site-nav" aria-label="Primary">
+            <button className="nav-link" type="button" onClick={() => selectView("rank")}>
+              Rank
+            </button>
+            <button className="nav-link is-active" type="button" aria-current="page">
+              Collection
+            </button>
+          </nav>
+        </>
+      ) : null}
 
-      <main id="main">
+      <main id="main" className={view === "rank" ? "rank-main" : "collection-main"}>
         {view === "rank" ? (
-          <section className="view rank-view" aria-labelledby="rank-title">
-            <div className="rank-heading">
-              <div>
-                <p className="eyebrow">
-                  <span className="pulse" aria-hidden="true" /> Taste session
-                </p>
-                <h1 id="rank-title">
-                  Which image <em>stays?</em>
-                </h1>
+          <section className="view rank-view hosted-rank-view" aria-labelledby="rank-title">
+            <h1 className="visually-hidden" id="rank-title">Choose the photograph you prefer</h1>
+            <div className="rank-overlay" aria-label="Ranking controls">
+              <div className="rank-identity" aria-label="Lumen taste session">
+                <span className="brand-mark" aria-hidden="true" />
+                <span>Lumen</span>
               </div>
-              <div className="session-tools">
-                <p aria-live="polite">
-                  {sessionChoices.toLocaleString()} {sessionChoices === 1 ? "choice" : "choices"} this session
+              <div className="rank-controls">
+                <p className="rank-session-status" aria-live="polite">
+                  <strong>{sessionChoices.toLocaleString()}</strong> this session
+                  <span aria-hidden="true">·</span>
+                  {stats.comparisons.toLocaleString()} total
                 </p>
-                <button className="icon-button" type="button" aria-label="Skip this pair" onClick={skip}>
+                <button className="rank-control-button" type="button" aria-label="Skip this pair" onClick={skip}>
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13m-4-4 4 4-4 4" /></svg>
                   <span>Skip</span>
                 </button>
                 <button
-                  className="icon-button"
+                  className="rank-control-button rank-list-button"
                   type="button"
-                  aria-label={fullscreen ? "Exit fullscreen comparison" : "Enter fullscreen comparison"}
-                  aria-pressed={fullscreen}
-                  onClick={() => {
-                    if (document.fullscreenElement) void document.exitFullscreen();
-                    else void arenaWrap.current?.requestFullscreen();
-                  }}
+                  onClick={() => selectView("collection")}
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5m13 5h5v-5" /></svg>
-                  <span>Fullscreen</span>
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z" />
+                  </svg>
+                  <span>Ranked list</span>
                 </button>
+                {accountMenu}
               </div>
             </div>
 
-            <div className="arena-wrap" ref={arenaWrap}>
+            <div className="arena-wrap">
               {pairState === "ready" && pair ? (
                 <div
                   className={`arena${deciding ? " is-deciding" : ""}${gesture ? " is-gesturing" : ""}`}
@@ -794,8 +776,6 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
               <p><kbd className="space-key">Space</kbd> Confirm your choice</p>
               <span className="instruction-rule" aria-hidden="true" />
               <p><kbd>S</kbd> Skip</p>
-              <span className="instruction-rule optional-instruction" aria-hidden="true" />
-              <p className="optional-instruction"><kbd>F</kbd> Fullscreen</p>
               <p className="click-hint">You can also click an image to choose it.</p>
               <p className="touch-hint">Tap a photograph · swipe toward a side · swipe up to skip</p>
             </div>
