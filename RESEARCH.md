@@ -1,5 +1,7 @@
 # Research and system design
 
+> Historical research: the deployed product now uses direct agent curation with ratings and visual references in context, not model fitting or reinforcement learning. The literature below remains available for comparison; current behavior is documented in README.md and CURATION.md.
+
 ## Executive decision
 
 This is a **single-user, inductive preference-learning** problem, not ordinary image classification and not generic aesthetic assessment. The primary observation is now one 1–5 ordinal judgment of one full-screen photograph; legacy pairwise choices remain valuable evidence and keep their historical Elo, but new labeling no longer requires two images at once. Strictly, a single-item score is an ordinal rating or Likert-type item, not a multi-item Likert scale.

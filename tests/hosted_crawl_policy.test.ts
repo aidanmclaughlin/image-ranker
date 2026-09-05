@@ -18,7 +18,7 @@ test("crawl replenishment starts at fifty and admits ten", () => {
   assert.throws(() => crawlRequestSize(50.5, 0), RangeError);
 });
 
-test("crawl scheduling uses the point-rating queue and repeatable cutoffs", async () => {
+test("legacy crawl history remains but hosted dispatch is retired", async () => {
   const [jobs, schema, ratingRoute, queueRoute, vercel] = await Promise.all([
     readFile(new URL("../lib/jobs.ts", import.meta.url), "utf8"),
     readFile(new URL("../db/schema.sql", import.meta.url), "utf8"),
@@ -44,17 +44,13 @@ test("crawl scheduling uses the point-rating queue and repeatable cutoffs", asyn
     schema,
     /WHERE kind = 'crawl' AND status IN \('queued', 'running', 'succeeded'\)/,
   );
-  assert.match(ratingRoute, /enqueueTrainingIfDue\(userId\)[\s\S]+enqueueCrawlIfDue\(userId\)/);
-  assert.match(ratingRoute, /enqueueCrawlIfDue\(userId\)/);
+  assert.doesNotMatch(ratingRoute, /enqueueTrainingIfDue|enqueueCrawlIfDue/);
   assert.match(jobs, /activeJobId: currentJob\.id/);
   assert.match(jobs, /publishCrawlWakeup\(userId, result\.activeJobId\)/);
   assert.match(jobs, /publishCrawlWakeup\(userId, job\.id\)/);
   assert.match(queueRoute, /handleCallback/);
-  assert.match(queueRoute, /scheduleTrainingIfDue\(userId\)/);
-  assert.match(queueRoute, /training\.scheduled \|\| training\.reason === "active-job"/);
-  assert.match(queueRoute, /reason === "active-job"/);
-  assert.match(queueRoute, /metadata\.deliveryCount >= 64/);
-  assert.match(vercel, /"topic": "lumen-crawl-wakeup"/);
+  assert.doesNotMatch(queueRoute, /scheduleTrainingIfDue|scheduleCrawl|afterSeconds/);
+  assert.doesNotMatch(vercel, /lumen-crawl-wakeup|crons/);
 });
 
 test("crawl queue payloads accept only an explicit owner identifier", () => {

@@ -12,3 +12,6 @@ __pycache__/
 tests/
 image_ranker/
 RESEARCH.md
+.curation/
+# Unrelated private document in the workspace is never deployment input.
+*.pdf

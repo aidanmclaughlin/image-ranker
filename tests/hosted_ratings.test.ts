@@ -51,7 +51,7 @@ test("excludeId is optional but must be one positive safe integer", () => {
   }
 });
 
-test("schema records immutable, replay-safe ratings and direct rewards", async () => {
+test("schema records immutable ratings without updating retired policy", async () => {
   const schema = await readFile(new URL("../db/schema.sql", import.meta.url), "utf8");
   assert.match(schema, /CREATE TABLE IF NOT EXISTS rating_issuances/);
   assert.match(schema, /CREATE TABLE IF NOT EXISTS image_ratings/);
@@ -60,17 +60,7 @@ test("schema records immutable, replay-safe ratings and direct rewards", async (
   assert.match(schema, /CREATE OR REPLACE FUNCTION record_user_rating/);
   assert.match(schema, /FROM rating_issuances AS issued[\s\S]+FOR UPDATE/);
   assert.match(schema, /prior_rating\.id IS NOT NULL/);
-  assert.match(schema, /UPDATE crawl_bandit_actions AS action/);
-  assert.match(
-    schema,
-    /human_reward = \(rating_value - 1\)::DOUBLE PRECISION \/ 4\.0/,
-  );
-  assert.match(
-    schema,
-    /effective_reward = \(rating_value - 1\)::DOUBLE PRECISION \/ 4\.0/,
-  );
-  assert.match(schema, /action\.policy_version = 'direct-rating-exp3-ix-v2'/);
-  assert.match(schema, /action\.effective_reward IS NULL/);
+  assert.doesNotMatch(schema, /UPDATE crawl_bandit_actions AS action/);
   assert.match(schema, /CREATE TRIGGER crawl_bandit_direct_discovery_single/);
   assert.match(schema, /ALTER COLUMN candidate_proxy_reward DROP NOT NULL/);
   assert.match(schema, /DROP INDEX IF EXISTS idx_worker_jobs_train_cutoff_day/);
@@ -93,10 +83,8 @@ test("hosted routes expose the single-image rating API contract", async () => {
   assert.match(getRoute, /private, no-store/);
   assert.match(postRoute, /parseRatingInput/);
   assert.match(postRoute, /recordRating\(userId, input\)/);
-  assert.match(postRoute, /enqueueCrawlIfDue\(userId\)/);
-  assert.match(postRoute, /enqueueTrainingIfDue\(userId\)/);
-  assert.match(postRoute, /enqueueTrainingIfDue\(userId\)[\s\S]+enqueueCrawlIfDue\(userId\)/);
-  assert.match(postRoute, /export const maxDuration = 780/);
+  assert.doesNotMatch(postRoute, /enqueueCrawlIfDue|enqueueTrainingIfDue/);
+  assert.match(postRoute, /export const maxDuration = 30/);
   assert.match(ranking, /ui\.point_rating IS NULL/);
   assert.match(ranking, /MAX\(issuance\.issued_at\) AS last_issued_at/);
   assert.match(ranking, /last_issued_at ASC NULLS FIRST/);

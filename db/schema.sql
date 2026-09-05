@@ -616,21 +616,28 @@ BEGIN
   UPDATE rating_issuances
      SET used_at = applied_at
    WHERE token_hash = rating_idempotency_key;
-  UPDATE crawl_bandit_actions AS action
-     SET human_reward = (rating_value - 1)::DOUBLE PRECISION / 4.0,
-         effective_reward = (rating_value - 1)::DOUBLE PRECISION / 4.0,
-         human_matches = 1
-    FROM crawl_bandit_discoveries AS discovery
-   WHERE discovery.user_id = rating_user_id
-     AND discovery.image_id = rating_image_id
-     AND action.user_id = discovery.user_id
-     AND action.id = discovery.action_id
-     AND action.policy_version = 'direct-rating-exp3-ix-v2'
-     AND action.status = 'observed'
-     AND action.effective_reward IS NULL;
+  -- Curation reads human feedback directly; retired policy history is immutable
+  -- in the active app and receives no new inferred or normalized rewards.
 
   RETURN QUERY SELECT rating_value, applied_at, FALSE;
 END;
 $$;
+
+-- Agent curation is separate from retired training and bandit history.
+CREATE TABLE IF NOT EXISTS curation_runs (
+  id UUID PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  finished_at TIMESTAMPTZ,
+  feedback_count INTEGER NOT NULL DEFAULT 0 CHECK (feedback_count >= 0),
+  imported_count INTEGER NOT NULL DEFAULT 0 CHECK (imported_count BETWEEN 0 AND 10),
+  summary TEXT,
+  details_json JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_curation_single_run
+  ON curation_runs(user_id) WHERE status = 'running';
+CREATE INDEX IF NOT EXISTS idx_curation_recent
+  ON curation_runs(user_id, started_at DESC);
 
 COMMIT;

@@ -2,7 +2,7 @@
 
 import { randomBytes } from "node:crypto";
 
-import { Client } from "pg";
+import { Client } from "@neondatabase/serverless";
 
 import { safeErrorMessage } from "../lib/redaction";
 
@@ -27,7 +27,7 @@ async function main(): Promise<void> {
     throw new Error("DATABASE_URL_UNPOOLED or DATABASE_URL is required");
   }
 
-  const client = new Client({ connectionString: databaseUrl });
+  const client = new Client({ connectionString: databaseUrl, connectionTimeoutMillis: 10000 });
   await client.connect();
   try {
     await client.query("BEGIN");
@@ -159,8 +159,8 @@ async function main(): Promise<void> {
     const ratingState = await client.query<{
       ratings: number;
       point_rating: number;
-      human_reward: number;
-      effective_reward: number;
+      human_reward: number | null;
+      effective_reward: number | null;
       human_matches: number;
     }>(
       `SELECT
@@ -180,11 +180,11 @@ async function main(): Promise<void> {
     if (
       ratingState.rows[0]?.ratings !== 1 ||
       ratingState.rows[0]?.point_rating !== 5 ||
-      ratingState.rows[0]?.human_reward !== 1 ||
-      ratingState.rows[0]?.effective_reward !== 1 ||
-      ratingState.rows[0]?.human_matches !== 1
+      ratingState.rows[0]?.human_reward !== null ||
+      ratingState.rows[0]?.effective_reward !== null ||
+      ratingState.rows[0]?.human_matches !== 0
     ) {
-      throw new Error("Rating replay or crawler reward state is incorrect");
+      throw new Error("Rating replay changed user feedback or retired policy history");
     }
     const legacyRatingTokenHash = randomBytes(32).toString("hex");
     await client.query(

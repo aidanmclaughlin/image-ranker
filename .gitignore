@@ -17,3 +17,4 @@ models/
 *.sqlite3-*
 .env*.local
 .env*
+.curation/

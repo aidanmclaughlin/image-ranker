@@ -183,15 +183,8 @@ function selectPair(
     const [left, right] = pair;
     const key = pairKey(left.id, right.id);
     const coverage = coverageScore(left, right, degrees, pairCounts.get(key) ?? 0);
-    let value: number;
-    if (left.predicted_utility !== null && right.predicted_utility !== null) {
-      const exponent = Math.exp(-Math.abs(left.predicted_utility - right.predicted_utility));
-      const uncertainty = (2 * exponent) / (1 + exponent);
-      value = 0.7 * uncertainty + 0.3 * coverage + 1e-6 * rng.random();
-    } else {
-      const eloTie = 1 / (1 + Math.abs(left.elo - right.elo) / 200);
-      value = 0.6 * coverage + 0.4 * eloTie + 1e-6 * rng.random();
-    }
+    const eloTie = 1 / (1 + Math.abs(left.elo - right.elo) / 200);
+    const value = 0.6 * coverage + 0.4 * eloTie + 1e-6 * rng.random();
     if (value > bestValue) {
       best = pair;
       bestValue = value;
@@ -508,7 +501,6 @@ export async function getLeaderboard(
        AND image.active
        AND (ui.point_rating IS NOT NULL OR ui.matches > 0)
      ORDER BY ui.point_rating DESC NULLS LAST,
-              ui.predicted_utility DESC NULLS LAST,
               ui.elo DESC, ui.matches DESC, image.id
      LIMIT ${limit}`;
 }

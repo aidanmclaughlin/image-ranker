@@ -8,7 +8,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Lumen — your photography canon",
-  description: "A private photography taste engine.",
+  description: "A private photography collection curated from your feedback.",
   applicationName: "Lumen",
   manifest: "/manifest.webmanifest",
   icons: {

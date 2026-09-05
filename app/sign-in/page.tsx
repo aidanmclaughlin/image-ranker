@@ -43,8 +43,8 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
             that <em>stay.</em>
           </h1>
           <p>
-            Train a taste model one choice at a time, then let it search for the
-            photographs you have not found yet.
+            Rate the photographs that move you. Your feedback guides what
+            we find next.
           </p>
         </div>
 

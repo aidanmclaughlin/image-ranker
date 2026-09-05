@@ -3,7 +3,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { Client } from "pg";
+import { Client } from "@neondatabase/serverless";
 
 import { safeErrorMessage } from "../lib/redaction";
 
@@ -17,7 +17,7 @@ async function main(): Promise<void> {
 
   const schemaPath = resolve("db/schema.sql");
   const schema = await readFile(schemaPath, "utf8");
-  const client = new Client({ connectionString: databaseUrl });
+  const client = new Client({ connectionString: databaseUrl, connectionTimeoutMillis: 10000 });
   await client.connect();
   try {
     // node-postgres uses PostgreSQL's simple-query protocol when no parameter

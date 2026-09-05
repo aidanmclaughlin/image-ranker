@@ -1,5 +1,4 @@
 import { auth } from "@/auth";
-import { enqueueCrawlIfDue, enqueueTrainingIfDue } from "@/lib/jobs";
 import { parseRatingInput } from "@/lib/rating-contract";
 import { InvalidRatingError, recordRating } from "@/lib/ranking";
 import { safeErrorMessage } from "@/lib/redaction";
@@ -7,7 +6,7 @@ import type { RatingInput } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-export const maxDuration = 780;
+export const maxDuration = 30;
 
 export async function POST(request: Request): Promise<Response> {
   const session = await auth();
@@ -29,8 +28,6 @@ export async function POST(request: Request): Promise<Response> {
 
   try {
     const result = await recordRating(userId, input);
-    await enqueueTrainingIfDue(userId);
-    await enqueueCrawlIfDue(userId);
     return Response.json(result, { status: 201 });
   } catch (error) {
     if (error instanceof InvalidRatingError) {

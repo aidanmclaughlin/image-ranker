@@ -10,10 +10,7 @@ import {
   useState,
 } from "react";
 
-import {
-  summarizeOperations,
-  type OperationsJob,
-} from "@/lib/job-status";
+import type { CurationStatus } from "@/lib/curation-status";
 
 type ImageRecord = {
   id: number;
@@ -47,7 +44,6 @@ type RatingResponse = {
 type View = "rank" | "collection";
 type LoadState = "loading" | "ready" | "empty" | "error";
 type Stats = { images: number; comparisons: number; ratings: number };
-type JobsResponse = { jobs: OperationsJob[] };
 
 type LumenAppProps = {
   accountMenu: ReactNode;
@@ -251,18 +247,19 @@ function formatJobTime(value: string | null): string {
   return Number.isNaN(date.valueOf()) ? "Unknown" : jobTimeFormatter.format(date);
 }
 
-function OperationsPanel({
-  jobs,
+function CurationPanel({
+  curation,
   state,
   error,
   onRefresh,
 }: {
-  jobs: OperationsJob[];
+  curation: CurationStatus | null;
   state: "loading" | "ready" | "error";
   error: string;
   onRefresh: () => void;
 }) {
-  const summaries = summarizeOperations(jobs);
+  const latest = curation?.runs[0];
+  const lastSuccess = curation?.runs.find((run) => run.status === "succeeded");
 
   return (
     <section
@@ -272,8 +269,8 @@ function OperationsPanel({
     >
       <div className="operations-heading">
         <div>
-          <p className="eyebrow">Private automation</p>
-          <h2 id="operations-title">The quiet machinery.</h2>
+          <p className="eyebrow">With your eye in mind</p>
+          <h2 id="operations-title">Curated by Codex.</h2>
         </div>
         <button
           className="operations-refresh"
@@ -289,7 +286,7 @@ function OperationsPanel({
       </div>
 
       {state === "loading" ? (
-        <div className="operations-loading" aria-label="Loading automation status">
+        <div className="operations-loading" aria-label="Loading curation status">
           <span />
           <span />
         </div>
@@ -297,7 +294,7 @@ function OperationsPanel({
 
       {state === "error" ? (
         <div className="operations-error" role="alert">
-          <strong>Automation status is unavailable.</strong>
+          <strong>Curation status is unavailable.</strong>
           <p>{error}</p>
           <button className="text-button" type="button" onClick={onRefresh}>
             Try again
@@ -311,41 +308,36 @@ function OperationsPanel({
         </p>
       ) : null}
 
-      {state === "ready" ? (
+      {state === "ready" && curation ? (
         <div className="operations-grid" aria-live="polite">
-          {summaries.map((summary) => (
             <article
               className="operations-job"
-              data-tone={summary.tone}
-              key={summary.kind}
+              data-tone={latest?.status === "failed" ? "attention" : latest?.status === "running" ? "active" : "healthy"}
             >
               <header>
-                <h3>{summary.name}</h3>
+                <h3>{curation.queue.unrated} waiting for your eye</h3>
                 <span className="operations-state">
                   <span className="operations-dot" aria-hidden="true" />
-                  {summary.state}
+                  {latest?.status === "running" ? "Curating" : latest?.status === "failed" ? "Needs attention" : curation.queue.needsRefill ? "Refill due" : "Ready"}
                 </span>
               </header>
-              <p className="operations-note">{summary.note}</p>
+              <p className="operations-note">
+                Your ratings and photographs guide each search — no separately trained model.
+                {` Up to ${curation.queue.batchSize} new picks when ${curation.queue.replenishAt} or fewer remain.`}
+              </p>
               <dl>
                 <div>
-                  <dt>Latest attempt</dt>
+                  <dt>Your feedback</dt>
                   <dd>
-                    {summary.lastAttemptAt ? (
-                      <time dateTime={summary.lastAttemptAt}>
-                        {formatJobTime(summary.lastAttemptAt)}
-                      </time>
-                    ) : (
-                      "Not yet"
-                    )}
+                    {curation.queue.rated} rated photographs
                   </dd>
                 </div>
                 <div>
-                  <dt>Last success</dt>
+                  <dt>Latest additions</dt>
                   <dd>
-                    {summary.lastSuccessAt ? (
-                      <time dateTime={summary.lastSuccessAt}>
-                        {formatJobTime(summary.lastSuccessAt)}
+                    {lastSuccess?.finishedAt ? (
+                      <time dateTime={lastSuccess.finishedAt}>
+                        {lastSuccess.importedCount} · {formatJobTime(lastSuccess.finishedAt)}
                       </time>
                     ) : (
                       "Not yet"
@@ -353,14 +345,9 @@ function OperationsPanel({
                   </dd>
                 </div>
               </dl>
-              {summary.action ? (
-                <p className="operations-action">
-                  <strong>Action</strong>
-                  <span>{summary.action}</span>
-                </p>
-              ) : null}
+              <p className="operations-note">Scheduled curation runs through Codex on your Mac while it is on and the app is running; your library remains available here.</p>
+              {latest?.status === "failed" ? <p className="operations-stale">The last curation run did not finish; no ratings were changed.</p> : null}
             </article>
-          ))}
         </div>
       ) : null}
     </section>
@@ -382,9 +369,9 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
   const [leaderboard, setLeaderboard] = useState<ImageRecord[]>([]);
   const [leaderboardState, setLeaderboardState] = useState<LoadState>("loading");
   const [leaderboardLoaded, setLeaderboardLoaded] = useState(false);
-  const [jobs, setJobs] = useState<OperationsJob[]>([]);
-  const [jobsState, setJobsState] = useState<"loading" | "ready" | "error">("loading");
-  const [jobsError, setJobsError] = useState("");
+  const [curation, setCuration] = useState<CurationStatus | null>(null);
+  const [curationState, setCurationState] = useState<"loading" | "ready" | "error">("loading");
+  const [curationError, setCurationError] = useState("");
   const [toast, setToast] = useState("");
   const [lightbox, setLightbox] = useState<{ image: ImageRecord; rank: number } | null>(null);
   const [gesture, setGesture] = useState<RatingValue | "skip" | null>(null);
@@ -457,18 +444,18 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
     }
   }, [announce]);
 
-  const loadJobs = useCallback(async (quiet = false) => {
-    if (!quiet) setJobsState("loading");
+  const loadCuration = useCallback(async (quiet = false) => {
+    if (!quiet) setCurationState("loading");
     try {
-      const result = await requestJson<JobsResponse>("/api/jobs?limit=50");
-      setJobs(result.jobs);
-      setJobsError("");
-      setJobsState("ready");
+      const result = await requestJson<CurationStatus>("/api/curation");
+      setCuration(result);
+      setCurationError("");
+      setCurationState("ready");
     } catch (error) {
-      setJobsError(
-        error instanceof Error ? error.message : "Could not load automation status.",
+      setCurationError(
+        error instanceof Error ? error.message : "Could not load curation status.",
       );
-      if (!quiet) setJobsState("error");
+      if (!quiet) setCurationState("error");
     }
   }, []);
 
@@ -511,24 +498,24 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
   useEffect(() => {
     if (view !== "collection") return;
     const statusLoad = window.setTimeout(() => {
-      void loadJobs();
+      void loadCuration();
     }, 0);
     return () => window.clearTimeout(statusLoad);
-  }, [loadJobs, view]);
+  }, [loadCuration, view]);
 
   useEffect(() => {
     if (
       view !== "collection" ||
-      jobsState !== "ready" ||
-      !jobs.some((job) => job.status === "queued" || job.status === "running")
+      curationState !== "ready" ||
+      !curation?.runs.some((run) => run.status === "running")
     ) {
       return;
     }
     const poll = window.setInterval(() => {
-      void loadJobs(true);
+      void loadCuration(true);
     }, 30_000);
     return () => window.clearInterval(poll);
-  }, [jobs, jobsState, loadJobs, view]);
+  }, [curation, curationState, loadCuration, view]);
 
   const rate = useCallback(
     async (value: RatingValue) => {
@@ -816,13 +803,13 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
                 <p className="eyebrow">Your living canon</p>
                 <h1 id="collection-title">The <em>collection.</em></h1>
               </div>
-              <p>Ordered by your ratings, with your private taste model breaking ties.</p>
+              <p>Your ratings, then your Elo. No predicted scores.</p>
             </div>
-            <OperationsPanel
-              jobs={jobs}
-              state={jobsState}
-              error={jobsError}
-              onRefresh={() => void loadJobs()}
+            <CurationPanel
+              curation={curation}
+              state={curationState}
+              error={curationError}
+              onRefresh={() => void loadCuration()}
             />
             <div className="collection-toolbar">
               <p aria-live="polite">

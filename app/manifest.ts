@@ -4,7 +4,7 @@ export default function manifest(): MetadataRoute.Manifest {
   return {
     name: "Lumen — Photography Ranker",
     short_name: "Lumen",
-    description: "A private photography taste engine.",
+    description: "A private photography collection curated from your feedback.",
     id: "/",
     start_url: "/",
     scope: "/",
