@@ -62,7 +62,7 @@ export type CurationImportDatabase = {
 export type CurationImportDependencies = {
   connect: (connectionString: string) => Promise<CurationImportDatabase>;
   fetcher: typeof fetch;
-  upload: (pathname: string, bytes: Buffer, contentType: string, token: string) => Promise<void>;
+  upload: (pathname: string, bytes: Buffer, contentType: string, credentials: { oidcToken: string; storeId: string }) => Promise<void>;
 };
 
 function secureUrl(value: string, hostname: string): URL {
@@ -178,7 +178,7 @@ export async function verifyCommonsCandidate(
   if (page.missing || !info || typeof info.url !== "string" || typeof page.title !== "string") throw new Error("Commons file has no original image information");
   const original = new URL(info.url);
   // Wikimedia's API may append analytics parameters; those do not identify file bytes.
-  for (const name of ["utm_source", "utm_medium", "utm_campaign"]) original.searchParams.delete(name);
+  for (const name of ["utm_source", "utm_medium", "utm_campaign", "utm_content"]) original.searchParams.delete(name);
   if (validateSourceUrl(original.href).href !== candidate.sourceUrl || page.title.replaceAll("_", " ") !== fileTitle.replaceAll("_", " ")) {
     throw new Error("Commons source metadata does not match the candidate file and URL");
   }
@@ -313,10 +313,10 @@ const defaultDependencies: CurationImportDependencies = {
     return client;
   },
   fetcher: fetch,
-  async upload(pathname, bytes, contentType, token) {
+  async upload(pathname, bytes, contentType, credentials) {
     await put(pathname, bytes, {
       access: "private", addRandomSuffix: false, allowOverwrite: true,
-      contentType, cacheControlMaxAge: 365 * 24 * 60 * 60, token,
+      contentType, cacheControlMaxAge: 365 * 24 * 60 * 60, ...credentials,
     });
   },
 };
@@ -335,14 +335,16 @@ async function validateRun(client: CurationImportDatabase, runId: string, userId
 }
 
 export async function importManifest(
-  options: { runId: string; manifest: unknown; userId?: string; connectionString?: string; blobToken?: string },
+  options: { runId: string; manifest: unknown; userId?: string; connectionString?: string; oidcToken?: string; storeId?: string },
   dependencies: CurationImportDependencies = defaultDependencies,
 ): Promise<ImportResult> {
   if (!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(options.runId)) throw new Error("runId must be a UUID");
   const userId = options.userId ?? configuredUser();
   const connectionString = options.connectionString ?? process.env.DATABASE_URL_UNPOOLED ?? process.env.DATABASE_URL;
-  const blobToken = options.blobToken ?? process.env.BLOB_READ_WRITE_TOKEN;
-  if (!connectionString || !blobToken) throw new Error("Private database and Blob credentials are required");
+  const oidcToken = options.oidcToken ?? process.env.VERCEL_OIDC_TOKEN;
+  const storeId = options.storeId ?? process.env.BLOB_STORE_ID;
+  if (!connectionString || !oidcToken || !storeId) throw new Error("Private database, VERCEL_OIDC_TOKEN, and BLOB_STORE_ID are required; run curator:refresh first");
+  const credentials = { oidcToken, storeId };
   const candidates = parseCurationManifest(options.manifest);
   const result: ImportResult = { runId: options.runId, accepted: [], rejected: [], importedCount: 0 };
   const client = await dependencies.connect(connectionString);
@@ -396,9 +398,9 @@ export async function importManifest(
           if (references.rows.length !== candidate.referenceImageIds.length) throw new CandidateRejection("Taste references must be photographs already rated or compared by this owner");
         }
         const paths = imageBlobPaths(prepared.sha256, prepared.extension);
-        await dependencies.upload(paths.original, prepared.original, prepared.contentType, blobToken);
-        await dependencies.upload(paths.preview, prepared.preview, "image/webp", blobToken);
-        await dependencies.upload(paths.thumb, prepared.thumbnail, "image/webp", blobToken);
+        await dependencies.upload(paths.original, prepared.original, prepared.contentType, credentials);
+        await dependencies.upload(paths.preview, prepared.preview, "image/webp", credentials);
+        await dependencies.upload(paths.thumb, prepared.thumbnail, "image/webp", credentials);
         const inserted = await client.query(
           `INSERT INTO images (sha256, filename, original_blob_path, preview_blob_path, thumbnail_blob_path,
               source_url, page_url, title, creator, license, width, height, metadata_json)

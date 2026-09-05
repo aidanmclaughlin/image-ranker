@@ -13,8 +13,9 @@
     "db:schema": "node --env-file=.env.local --import tsx scripts/apply-schema.ts",
     "db:verify": "node --env-file=.env.local --import tsx scripts/verify-schema.ts",
     "db:worker-role": "node --env-file=.env.local --import tsx scripts/provision-worker-role.ts",
-    "curator": "node --env-file=.env.local --import tsx scripts/curator.ts",
-    "curator:import": "node --env-file=.env.local --import tsx scripts/curator-import.ts"
+    "curator:refresh": "vercel env pull .env.local --environment=production --yes",
+    "curator": "node --env-file=.env.local --env-file=.env.curator.local --import tsx scripts/curator.ts",
+    "curator:import": "node --env-file=.env.local --env-file=.env.curator.local --import tsx scripts/curator-import.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "1.1.0",

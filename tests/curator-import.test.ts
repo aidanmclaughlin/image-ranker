@@ -45,7 +45,7 @@ test("manifests require explicit sources, licenses, and taste evidence", () => {
 
 function commonsMetadata(overrides: Record<string, unknown> = {}) {
   return { query: { pages: [{ pageid: 123, title: "File:Mountains.jpg", imageinfo: [{
-    url: `${candidate.sourceUrl}?utm_source=commons&utm_medium=api&utm_campaign=test`, size: 100_000,
+    url: `${candidate.sourceUrl}?utm_source=commons&utm_medium=api&utm_campaign=imageinfo&utm_content=original`, size: 100_000,
     extmetadata: { Artist: { value: '<a href="/wiki/User:Example">Verified Photographer</a>' }, LicenseShortName: { value: "CC BY-SA 4.0" }, LicenseUrl: { value: "https://creativecommons.org/licenses/by-sa/4.0/" } },
     ...overrides,
   }] }] } };
@@ -64,6 +64,7 @@ test("Commons verification binds the exact file and uses source-reported attribu
 });
 
 test("Commons verification rejects mismatched source files and unlicensed originals", async () => {
+  await assert.rejects(verifyCommonsCandidate(candidate, mockFetch(() => Response.json(commonsMetadata({ url: `${candidate.sourceUrl}?token=unexpected` })))), /uncredentialed HTTPS/);
   await assert.rejects(verifyCommonsCandidate(candidate, mockFetch(() => Response.json(commonsMetadata({ url: "https://upload.wikimedia.org/wikipedia/commons/a/ab/Other.jpg" })))), /does not match/);
   await assert.rejects(verifyCommonsCandidate(candidate, mockFetch(() => Response.json(commonsMetadata({ extmetadata: { Artist: { value: "Artist" }, LicenseShortName: { value: "CC BY-NC 4.0" } } })))), /supported/);
   await assert.rejects(verifyCommonsCandidate(candidate, mockFetch(() => Response.json({ error: { code: "maxlag" } }))), /exactly one original/);
@@ -172,12 +173,15 @@ function fakeInfrastructure(options: { imported?: number; daily?: number; validR
       downloads += 1;
       return new Response(new Uint8Array(await validImage), { headers: { "content-type": "image/jpeg" } });
     }),
-    async upload(pathname) { uploads.push(pathname); },
+    async upload(pathname, _bytes, _contentType, credentials) {
+      assert.deepEqual(credentials, { oidcToken: "test-oidc", storeId: "test-store" });
+      uploads.push(pathname);
+    },
   };
   return { deps, queries, uploads, get downloads() { return downloads; }, get closed() { return closed; } };
 }
 
-const importOptions = { runId, userId: "owner", manifest: [candidate], connectionString: "postgresql://test", blobToken: "test" };
+const importOptions = { runId, userId: "owner", manifest: [candidate], connectionString: "postgresql://test", oidcToken: "test-oidc", storeId: "test-store" };
 
 test("successful import locks and commits only an unrated image plus audit metadata", async () => {
   const infra = fakeInfrastructure();

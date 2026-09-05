@@ -19,9 +19,11 @@ The website runs on Vercel independently of your Mac. **Scheduled agent curation
 Use Node.js 24 or newer for the curator tools (native WebSocket support), install with `npm ci`, and connect a Next.js Vercel project to private Blob and Neon stores. Supply these secrets only to Production and an ignored local `.env.local`:
 
 - `DATABASE_URL` and optionally `DATABASE_URL_UNPOOLED`.
-- `BLOB_READ_WRITE_TOKEN` for the private store.
+- `BLOB_STORE_ID` for the connected private store; the curator uses a freshly pulled `VERCEL_OIDC_TOKEN`, as the existing hosted migration does.
 - `AUTH_SECRET`, `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET`.
 - `AUTH_ALLOWED_GOOGLE_SUBS`: exactly one immutable Google subject for curation.
+
+Vercel's protected environment values are deliberately not exported. For the local curator, put the exact owner `user.id` verified through the signed-in production `/api/auth/session` in ignored `.env.curator.local` as `AUTH_ALLOWED_GOOGLE_SUBS`; it is loaded after `.env.local` and is not overwritten by credential refresh. Never infer the owner from an email or change the hosted allowlist. Restrict both local environment files to mode `0600`.
 
 Set the OAuth callback to `https://YOUR_DOMAIN/api/auth/callback/google`. The existing Auth.js owner bootstrap and deployment security requirements are documented in [the archived deployment guide](LEGACY_ML.md#2-configure-google-sign-in); worker, cron, queue, and snapshot setup in that guide is retired and must not be re-enabled.
 
@@ -44,6 +46,7 @@ The durable operating instructions are [CURATION.md](CURATION.md). Read them bef
 Activate the hourly task only after its private local configuration is authorized and a manual curation run has succeeded; until then, keep the task paused. Publishing the website alone does not activate curation.
 
 ```bash
+npm run curator:refresh
 npm run curator -- status
 npm run curator -- begin
 npm run curator -- context
@@ -54,7 +57,7 @@ npm run curator -- finish --run-id UUID --notes .curation/notes.json
 
 `context` writes private JSON and uncropped reference contact sheets under `.curation/`, which is excluded from Git and deployments. `begin` holds a per-owner database lease and returns whether a run is due. `--bootstrap` allows the first curated batch before the queue reaches its threshold; it is not used by recurring curation. Failed and interrupted runs preserve any successfully imported images and never manufacture ratings.
 
-The importer accepts only full-size originals from Wikimedia Commons with verified public-domain or Creative Commons metadata, decodes files, enforces resolution and byte limits, checks exact duplicates and indexed perceptual hashes, and stores the original plus uncropped previews. External websites are research sources, not authorization to copy their images. This intentionally does not scrape private Instagram accounts, bypass access controls, or copy unlicensed award galleries.
+Refresh credentials before every run through the signed-in Vercel CLI; if login or refresh fails, stop rather than use expired credentials. The importer accepts only full-size originals from Wikimedia Commons with verified public-domain or Creative Commons metadata, decodes files, enforces resolution and byte limits, checks exact duplicates and indexed perceptual hashes, and stores the original plus uncropped previews. External websites are research sources, not authorization to copy their images. This intentionally does not scrape private Instagram accounts, bypass access controls, or copy unlicensed award galleries.
 
 ## Costs, limits, and privacy
 
