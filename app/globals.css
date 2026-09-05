@@ -77,6 +77,8 @@
   animation: shimmer 1.6s linear infinite;
 }
 
+.collection-view .gallery-card:hover img { transform: none; filter: none; }
+
 .operations-panel {
   margin: 0 0 clamp(34px, 5vh, 58px);
   padding: clamp(20px, 2.4vw, 34px);
@@ -422,13 +424,13 @@
   background: #070706;
 }
 
-.hosted-rank-view .rating-stage-wrap {
+.hosted-rank-view .pair-stage-wrap {
   position: absolute;
   inset: 0;
   min-height: 0;
 }
 
-.hosted-rank-view .rating-stage {
+.hosted-rank-view .pair-stage {
   position: absolute;
   inset: 0;
   height: 100%;
@@ -437,23 +439,29 @@
   background: #070706;
 }
 
-.rating-gesture-surface,
-.rating-photo {
+.pair-gesture-surface,
+.pair-photo {
   position: absolute;
   inset: 0;
 }
 
-.rating-gesture-surface {
+.pair-gesture-surface {
+  top: calc(max(14px, env(safe-area-inset-top)) + 60px);
+  bottom: calc(max(18px, env(safe-area-inset-bottom)) + 72px);
   touch-action: none;
   overscroll-behavior: contain;
 }
 
-.rating-photo {
+.pair-photo {
   overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
   background: #070706;
 }
 
-.rating-photo .image-shell {
+.pair-photo.is-active { visibility: visible; }
+
+.pair-photo .image-shell {
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -461,7 +469,7 @@
   background: #070706;
 }
 
-.rating-photo img {
+.pair-photo img {
   position: absolute;
   inset: 0;
   width: auto;
@@ -475,28 +483,13 @@
   color: transparent;
   font-size: 0;
   opacity: 0;
-  transform: scale(.994);
-  transition: opacity .42s ease, transform .55s var(--ease), filter .3s ease;
   user-select: none;
 }
 
-.rating-photo.is-loaded img { opacity: 1; transform: scale(1); }
-.rating-photo.is-loaded .loading-shimmer { display: none; }
-.rating-photo .choice-wash {
-  background: radial-gradient(circle at 50% 50%, transparent 56%, rgba(0, 0, 0, .14) 100%);
-  transition: background .2s ease, box-shadow .24s ease;
-}
+.pair-photo.is-loaded img { opacity: 1; }
+.pair-photo.is-loaded .loading-shimmer { display: none; }
 
-.rating-photo.is-deciding img { transform: scale(1); }
-.rating-photo.is-deciding .choice-wash {
-  background: rgba(217, 255, 67, .06);
-  box-shadow: inset 0 0 80px rgba(217, 255, 67, .08);
-}
-
-.rating-stage.is-gesturing .rating-photo img { transform: scale(.996); }
-.rating-stage[data-gesture="skip"] .rating-photo img { filter: brightness(.56) saturate(.72); }
-
-.rating-scale {
+.pair-navigation {
   position: absolute;
   z-index: 18;
   left: 50%;
@@ -504,7 +497,7 @@
   padding: 5px 7px;
   display: flex;
   align-items: center;
-  gap: 1px;
+  gap: 2px;
   border: 1px solid rgba(247, 245, 239, .18);
   border-radius: 999px;
   background: rgba(12, 12, 10, .74);
@@ -513,53 +506,34 @@
   transform: translateX(-50%);
 }
 
-.rating-value {
+.pair-navigation button {
   appearance: none;
-  width: 42px;
-  height: 42px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   display: grid;
   place-items: center;
   border: 0;
   border-radius: 50%;
   background: transparent;
-  color: rgba(247, 245, 239, .52);
+  color: rgba(247, 245, 239, .7);
   cursor: pointer;
-  transition: background .18s ease, color .18s ease, transform .2s var(--ease);
+  transition: background .18s ease, color .18s ease;
 }
 
-.rating-value:hover { background: rgba(247, 245, 239, .08); color: var(--white); }
-.rating-value:focus-visible { outline: 2px solid var(--acid); outline-offset: -3px; }
-.rating-value:disabled { cursor: wait; }
-
-.rating-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  box-shadow: 0 0 0 0 rgba(217, 255, 67, 0);
-  transition: width .2s var(--ease), height .2s var(--ease), color .18s ease, box-shadow .2s ease, transform .2s var(--ease);
-}
-
-.rating-value[data-value="2"] .rating-dot { width: 8px; height: 8px; }
-.rating-value[data-value="3"] .rating-dot { width: 10px; height: 10px; }
-.rating-value[data-value="4"] .rating-dot { width: 12px; height: 12px; }
-.rating-value[data-value="5"] .rating-dot { width: 14px; height: 14px; }
-
-.rating-value.is-preview,
-.rating-value.is-selected {
-  background: rgba(217, 255, 67, .1);
-  color: var(--acid);
-  transform: translateY(-1px);
-}
-
-.rating-value.is-preview .rating-dot,
-.rating-value.is-selected .rating-dot {
-  box-shadow: 0 0 0 5px rgba(217, 255, 67, .1), 0 0 20px rgba(217, 255, 67, .28);
-  transform: scale(1.08);
-}
-
-.rating-loading .loading-shimmer { display: block; }
+.pair-navigation button:hover { background: rgba(247, 245, 239, .08); color: var(--white); }
+.pair-navigation button:focus-visible { outline: 2px solid var(--acid); outline-offset: -3px; }
+.pair-navigation button:disabled { cursor: wait; opacity: .35; }
+.pair-navigation svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.pair-position { display: flex; align-items: center; }
+.pair-navigation .pair-position-button { width: 32px; border-radius: 12px; }
+.pair-position-button span { width: 5px; height: 5px; border-radius: 50%; background: rgba(247, 245, 239, .26); }
+.pair-position-button[aria-pressed="true"] span { background: var(--white); }
+.pair-control-divider { width: 1px; height: 20px; margin-inline: 6px; background: rgba(247, 245, 239, .14); }
+.pair-navigation .pair-choose { background: var(--acid); color: var(--ink); }
+.pair-navigation .pair-choose:hover { background: var(--white); color: var(--ink); }
+.pair-stage.is-deciding .pair-choose { animation: operation-pulse .8s ease-in-out infinite; }
+.pair-loading .loading-shimmer { display: block; }
 
 .minimal-rank-state {
   position: absolute;
@@ -726,12 +700,15 @@
   .rank-list-button { padding-inline: 11px; }
   .hosted-rank-view .account-menu summary { width: 34px; height: 34px; }
 
-  .rating-scale {
+  .pair-navigation {
     bottom: max(11px, env(safe-area-inset-bottom));
     padding: 4px 6px;
   }
 
-  .rating-value { width: 41px; height: 41px; }
+  .pair-gesture-surface {
+    top: calc(max(9px, env(safe-area-inset-top)) + 55px);
+    bottom: calc(max(11px, env(safe-area-inset-bottom)) + 68px);
+  }
 
   .hosted-rank-view .account-popover {
     position: fixed;
@@ -742,9 +719,14 @@
 
 @media (max-width: 430px) {
   .rank-control-button { gap: 6px; }
-  .rating-value { width: 39px; height: 39px; }
 }
 
 @media (max-height: 520px) {
-  .rating-scale { bottom: 8px; }
+  .pair-navigation { bottom: max(8px, env(safe-area-inset-bottom)); }
+  .pair-gesture-surface { bottom: calc(max(8px, env(safe-area-inset-bottom)) + 62px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pair-navigation button { transition: none; }
+  .pair-stage.is-deciding .pair-choose { animation: none; }
 }

@@ -22,7 +22,7 @@ const candidate: CurationCandidate = {
   title: "Mountains at sunrise",
   creator: "Example Photographer",
   license: "CC BY-SA 4.0",
-  rationale: "The layered peaks and directional light echo your five-star reference.",
+  rationale: "The layered peaks and directional light echo the reference you chose over another landscape.",
   referenceImageIds: [8],
 };
 
@@ -154,13 +154,18 @@ function fakeInfrastructure(options: { imported?: number; daily?: number; validR
         async query(query, values) {
           queries.push(query);
           let rows: Record<string, unknown>[] = [];
-          if (query.includes("SELECT imported_count")) rows = options.validRun === false ? [] : [{ imported_count: imported, allowance: 10 }];
+          if (query.includes("SELECT imported_count")) {
+            assert.match(query, /details_json->>'feedbackMode' = \$4/);
+            assert.equal(values?.[3], "pairwise");
+            rows = options.validRun === false ? [] : [{ imported_count: imported, allowance: 10 }];
+          }
           else if (query.includes("COUNT(*)::int AS count")) rows = [{ count: options.daily ?? 0 }];
           else if (query.includes("difference_hash")) rows = options.known ?? [];
           else if (query.includes("SELECT image_id")) rows = (options.references ?? [8]).map((image_id) => ({ image_id }));
           else if (query.includes("INSERT INTO images")) {
             if (options.failInsert) throw new Error("database insertion failed");
             assert.equal(values?.[12] && JSON.parse(String(values[12])).agentCuration.runId, runId);
+            assert.equal(values?.[12] && JSON.parse(String(values[12])).agentCuration.feedbackMode, "pairwise");
             rows = [{ id: 81 }];
           } else if (query.includes("UPDATE curation_runs")) imported += 1;
           return { rows, rowCount: rows.length };
@@ -183,7 +188,7 @@ function fakeInfrastructure(options: { imported?: number; daily?: number; validR
 
 const importOptions = { runId, userId: "owner", manifest: [candidate], connectionString: "postgresql://test", oidcToken: "test-oidc", storeId: "test-store" };
 
-test("successful import locks and commits only an unrated image plus audit metadata", async () => {
+test("successful import locks and commits only an uncompared image plus audit metadata", async () => {
   const infra = fakeInfrastructure();
   const result = await importManifest(importOptions, infra.deps);
   assert.deepEqual(result.accepted.map((entry) => entry.imageId), [81]);
@@ -193,6 +198,8 @@ test("successful import locks and commits only an unrated image plus audit metad
   assert.ok(infra.queries.some((query) => query.includes("pg_advisory_xact_lock")));
   assert.ok(infra.queries.some((query) => query === "COMMIT"));
   assert.ok(!infra.queries.some((query) => /INSERT INTO (?:image_ratings|comparisons)|UPDATE user_images/.test(query)));
+  assert.ok(infra.queries.some((query) => /SELECT image_id[\s\S]*AND matches > 0/.test(query)));
+  assert.ok(!infra.queries.some((query) => /point_rating/.test(query)));
   assert.equal(infra.closed, true);
 });
 
@@ -229,7 +236,7 @@ test("exact duplicates, perceptual duplicates, and unknown references are reject
   }
   const refs = fakeInfrastructure({ references: [] });
   const result = await importManifest(importOptions, refs.deps);
-  assert.match(result.rejected[0].reason, /already rated or compared/);
+  assert.match(result.rejected[0].reason, /already compared/);
   assert.equal(refs.uploads.length, 0);
 });
 

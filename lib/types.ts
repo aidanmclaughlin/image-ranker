@@ -13,8 +13,6 @@ export interface RankedImageRow {
   wins: number;
   losses: number;
   predicted_utility: number | null;
-  point_rating: number | null;
-  point_rated_at: string | Date | null;
 }
 
 export interface ImageView {
@@ -31,8 +29,6 @@ export interface ImageView {
   matches: number;
   wins: number;
   losses: number;
-  pointRating: number | null;
-  pointRatedAt: string | null;
   imageUrl: string;
   thumbnailUrl: string;
 }
@@ -80,7 +76,6 @@ export interface RatingResult {
 export interface StatsResponse {
   images: number;
   comparisons: number;
-  ratings: number;
 }
 
 export function presentImage(image: RankedImageRow): ImageView {
@@ -99,11 +94,6 @@ export function presentImage(image: RankedImageRow): ImageView {
     matches: image.matches,
     wins: image.wins,
     losses: image.losses,
-    pointRating: image.point_rating,
-    pointRatedAt:
-      image.point_rated_at instanceof Date
-        ? image.point_rated_at.toISOString()
-        : image.point_rated_at,
     imageUrl: `${root}?variant=preview`,
     thumbnailUrl: `${root}?variant=thumb`,
   };

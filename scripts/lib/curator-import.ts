@@ -6,7 +6,7 @@ import sharp from "sharp";
 
 import { imageBlobPaths } from "../../lib/blob-paths";
 import { safeErrorMessage } from "../../lib/redaction";
-import { CURATOR_BATCH, CURATOR_DAILY_CAP, CURATOR_LEASE_HOURS } from "../../lib/curator-policy";
+import { CURATOR_BATCH, CURATOR_DAILY_CAP, CURATOR_FEEDBACK_MODE, CURATOR_LEASE_HOURS } from "../../lib/curator-policy";
 
 export const CURATION_IMPORT_LIMITS = {
   bytes: 30 * 1024 * 1024,
@@ -325,10 +325,11 @@ async function validateRun(client: CurationImportDatabase, runId: string, userId
   const result = await client.query(
     `SELECT imported_count, details_json->>'allowance' AS allowance FROM curation_runs
      WHERE id = $1::uuid AND user_id = $2 AND status = 'running'
+       AND details_json->>'feedbackMode' = $4
        AND started_at > NOW() - $3::int * INTERVAL '1 hour' FOR UPDATE`,
-    [runId, userId, CURATOR_LEASE_HOURS],
+    [runId, userId, CURATOR_LEASE_HOURS, CURATOR_FEEDBACK_MODE],
   );
-  if (!result.rows.length) throw new Error("Curation run is absent, expired, completed, or belongs to another owner");
+  if (!result.rows.length) throw new Error("Curation run is absent, expired, completed, non-pairwise, or belongs to another owner");
   const allowance = Number(result.rows[0].allowance);
   if (!Number.isInteger(allowance) || allowance < 1 || allowance > CURATOR_BATCH) throw new Error("Curation run has no valid import allowance");
   return { importedCount: Number(result.rows[0].imported_count), allowance };
@@ -392,10 +393,10 @@ export async function importManifest(
         if (candidate.referenceImageIds.length) {
           const references = await client.query(
             `SELECT image_id FROM user_images WHERE user_id = $1 AND image_id = ANY($2::int[])
-              AND (point_rating IS NOT NULL OR matches > 0)`,
+              AND matches > 0`,
             [userId, candidate.referenceImageIds],
           );
-          if (references.rows.length !== candidate.referenceImageIds.length) throw new CandidateRejection("Taste references must be photographs already rated or compared by this owner");
+          if (references.rows.length !== candidate.referenceImageIds.length) throw new CandidateRejection("Taste references must be photographs already compared by this owner");
         }
         const paths = imageBlobPaths(prepared.sha256, prepared.extension);
         await dependencies.upload(paths.original, prepared.original, prepared.contentType, credentials);
@@ -410,7 +411,7 @@ export async function importManifest(
             paths.original, paths.preview, paths.thumb, candidate.sourceUrl, candidate.pageUrl,
             candidate.title, candidate.creator, candidate.license, prepared.width, prepared.height,
             JSON.stringify({ differenceHash: prepared.differenceHash, agentCuration: {
-              runId: options.runId, rationale: candidate.rationale,
+              feedbackMode: CURATOR_FEEDBACK_MODE, runId: options.runId, rationale: candidate.rationale,
               referenceImageIds: candidate.referenceImageIds, exploration: candidate.exploration === true,
               sourceVerification: candidate.sourceVerification,
               importedAt: new Date().toISOString(),

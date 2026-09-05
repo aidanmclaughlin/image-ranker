@@ -11,6 +11,7 @@ import {
 } from "react";
 
 import type { CurationStatus } from "@/lib/curation-status";
+import { comparisonInputForPair } from "@/lib/comparison-contract";
 
 type ImageRecord = {
   id: number;
@@ -26,8 +27,6 @@ type ImageRecord = {
   matches?: number;
   wins?: number;
   losses?: number;
-  pointRating?: number | null;
-  pointRatedAt?: string | null;
   imageUrl?: string;
   thumbnailUrl?: string;
   previewUrl?: string;
@@ -35,21 +34,20 @@ type ImageRecord = {
   originalUrl?: string;
 };
 
-type RatingValue = 1 | 2 | 3 | 4 | 5;
-type RatingItem = { image: ImageRecord; ratingToken: string };
-type RatingResponse = {
-  image: ImageRecord | null;
-  ratingToken: string | null;
+type PairSide = "left" | "right";
+type PairItem = { left: ImageRecord; right: ImageRecord; comparisonToken: string };
+type PairResponse = {
+  left: ImageRecord | null;
+  right: ImageRecord | null;
+  comparisonToken: string | null;
 };
 type View = "rank" | "collection";
 type LoadState = "loading" | "ready" | "empty" | "error";
-type Stats = { images: number; comparisons: number; ratings: number };
+type Stats = { images: number; comparisons: number };
 
 type LumenAppProps = {
   accountMenu: ReactNode;
 };
-
-const RATING_VALUES = [1, 2, 3, 4, 5] as const;
 
 type PhotoProps = {
   image: ImageRecord;
@@ -143,15 +141,15 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-function RatingPhoto({
+function PairPhoto({
   image,
-  selectedRating,
-  deciding,
+  active,
+  onLoad,
   onUnavailable,
 }: {
   image: ImageRecord;
-  selectedRating: RatingValue | null;
-  deciding: boolean;
+  active: boolean;
+  onLoad: () => void;
   onUnavailable: () => void;
 }) {
   const [loaded, setLoaded] = useState(false);
@@ -160,8 +158,8 @@ function RatingPhoto({
 
   return (
     <div
-      className={`rating-photo${loaded ? " is-loaded" : ""}${deciding ? " is-deciding" : ""}`}
-      data-rating={selectedRating ?? undefined}
+      className={`pair-photo${loaded ? " is-loaded" : ""}${active ? " is-active" : ""}`}
+      aria-hidden={!active}
     >
       <span className="image-shell">
         <span className="loading-shimmer" aria-hidden="true" />
@@ -169,22 +167,15 @@ function RatingPhoto({
           image={image}
           variant="preview"
           alt={`${title}, by ${creator}`}
-          onLoad={() => setLoaded(true)}
+          onLoad={() => {
+            setLoaded(true);
+            onLoad();
+          }}
           onUnavailable={onUnavailable}
         />
-        <span className="choice-wash" aria-hidden="true" />
       </span>
     </div>
   );
-}
-
-function ratingForSwipe(distance: number, viewportWidth: number): RatingValue {
-  const magnitude = Math.abs(distance);
-  const softThreshold = Math.max(48, Math.min(76, viewportWidth * 0.16));
-  const strongThreshold = Math.max(96, Math.min(150, viewportWidth * 0.34));
-  if (magnitude < softThreshold) return 3;
-  if (magnitude < strongThreshold) return distance < 0 ? 2 : 4;
-  return distance < 0 ? 1 : 5;
 }
 
 function GalleryCard({
@@ -219,15 +210,9 @@ function GalleryCard({
         <small className="gallery-creator">{creatorOf(image)}</small>
         <span
           className="gallery-score"
-          title={
-            image.pointRating
-              ? `Your rating: ${image.pointRating} out of 5`
-              : `${(image.matches ?? 0).toLocaleString()} legacy comparisons`
-          }
+          title={`${(image.matches ?? 0).toLocaleString()} comparisons`}
         >
-          {image.pointRating
-            ? `${image.pointRating} / 5`
-            : `${Math.round(image.elo ?? 1500).toLocaleString()} Elo`}
+          {Math.round(image.elo ?? 1500).toLocaleString()} Elo
         </span>
       </span>
     </button>
@@ -315,21 +300,21 @@ function CurationPanel({
               data-tone={latest?.status === "failed" ? "attention" : latest?.status === "running" ? "active" : "healthy"}
             >
               <header>
-                <h3>{curation.queue.unrated} waiting for your eye</h3>
+                <h3>{curation.queue.uncompared} waiting for your eye</h3>
                 <span className="operations-state">
                   <span className="operations-dot" aria-hidden="true" />
                   {latest?.status === "running" ? "Curating" : latest?.status === "failed" ? "Needs attention" : curation.queue.needsRefill ? "Refill due" : "Ready"}
                 </span>
               </header>
               <p className="operations-note">
-                Your ratings and photographs guide each search — no separately trained model.
+                Your comparisons and photographs guide each search — no separately trained model.
                 {` Up to ${curation.queue.batchSize} new picks when ${curation.queue.replenishAt} or fewer remain.`}
               </p>
               <dl>
                 <div>
                   <dt>Your feedback</dt>
                   <dd>
-                    {curation.queue.rated} rated photographs
+                    {curation.queue.compared} compared photographs
                   </dd>
                 </div>
                 <div>
@@ -346,7 +331,7 @@ function CurationPanel({
                 </div>
               </dl>
               <p className="operations-note">Scheduled curation runs through Codex on your Mac while it is on and the app is running; your library remains available here.</p>
-              {latest?.status === "failed" ? <p className="operations-stale">The last curation run did not finish; no ratings were changed.</p> : null}
+              {latest?.status === "failed" ? <p className="operations-stale">The last curation run did not finish; no comparisons were changed.</p> : null}
             </article>
         </div>
       ) : null}
@@ -356,15 +341,15 @@ function CurationPanel({
 
 export function LumenApp({ accountMenu }: LumenAppProps) {
   const [view, setView] = useState<View>("rank");
-  const [ratingItem, setRatingItem] = useState<RatingItem | null>(null);
-  const [ratingState, setRatingState] = useState<LoadState>("loading");
+  const [pair, setPair] = useState<PairItem | null>(null);
+  const [pairState, setPairState] = useState<LoadState>("loading");
+  const [activeSide, setActiveSide] = useState<PairSide>("left");
+  const [loadedSides, setLoadedSides] = useState({ left: false, right: false });
   const [deciding, setDeciding] = useState(false);
-  const [selectedRating, setSelectedRating] = useState<RatingValue | null>(null);
   const [sessionChoices, setSessionChoices] = useState(0);
   const [stats, setStats] = useState<Stats>({
     images: 0,
     comparisons: 0,
-    ratings: 0,
   });
   const [leaderboard, setLeaderboard] = useState<ImageRecord[]>([]);
   const [leaderboardState, setLeaderboardState] = useState<LoadState>("loading");
@@ -374,12 +359,12 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
   const [curationError, setCurationError] = useState("");
   const [toast, setToast] = useState("");
   const [lightbox, setLightbox] = useState<{ image: ImageRecord; rank: number } | null>(null);
-  const [gesture, setGesture] = useState<RatingValue | "skip" | null>(null);
 
   const dialog = useRef<HTMLDialogElement>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const ratingRequest = useRef(0);
-  const ratingLoadInFlight = useRef(false);
+  const pairRequest = useRef(0);
+  const pairLoadInFlight = useRef(false);
+  const decisionInFlight = useRef(false);
   const pointerStart = useRef<{ x: number; y: number } | null>(null);
 
   const announce = useCallback((message: string) => {
@@ -396,37 +381,39 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
     }
   }, [announce]);
 
-  const loadRating = useCallback(async (excludeId?: number) => {
-    if (ratingLoadInFlight.current) return;
-    ratingLoadInFlight.current = true;
-    const requestId = ++ratingRequest.current;
+  const loadPair = useCallback(async (excludedPair?: PairItem) => {
+    if (pairLoadInFlight.current) return;
+    pairLoadInFlight.current = true;
+    const requestId = ++pairRequest.current;
     try {
-      const path = excludeId
-        ? `/api/rating?excludeId=${encodeURIComponent(excludeId)}`
-        : "/api/rating";
-      const result = await requestJson<RatingResponse>(path);
-      if (requestId !== ratingRequest.current) return;
-      if (!result.image) {
-        setRatingItem(null);
-        setRatingState("empty");
+      const path = excludedPair
+        ? `/api/pair?excludeLeftId=${excludedPair.left.id}&excludeRightId=${excludedPair.right.id}`
+        : "/api/pair";
+      const result = await requestJson<PairResponse>(path);
+      if (requestId !== pairRequest.current) return;
+      if (!result.left && !result.right) {
+        setPair(null);
+        setPairState("empty");
         return;
       }
-      if (!result.ratingToken) {
-        throw new Error("The server did not issue a rating token.");
+      if (!result.left || !result.right || result.left.id === result.right.id || !result.comparisonToken) {
+        throw new Error("The server did not issue a complete comparison pair.");
       }
-      setSelectedRating(null);
-      setRatingItem({
-        image: result.image,
-        ratingToken: result.ratingToken,
+      setActiveSide("left");
+      setLoadedSides({ left: false, right: false });
+      setPair({
+        left: result.left,
+        right: result.right,
+        comparisonToken: result.comparisonToken,
       });
-      setRatingState("ready");
+      setPairState("ready");
     } catch (error) {
-      if (requestId !== ratingRequest.current) return;
-      setRatingItem(null);
-      setRatingState("error");
-      announce(error instanceof Error ? error.message : "Could not load a photograph.");
+      if (requestId !== pairRequest.current) return;
+      setPair(null);
+      setPairState("error");
+      announce(error instanceof Error ? error.message : "Could not load a comparison.");
     } finally {
-      ratingLoadInFlight.current = false;
+      pairLoadInFlight.current = false;
     }
   }, [announce]);
 
@@ -461,13 +448,13 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
 
   useEffect(() => {
     const initialLoad = window.setTimeout(() => {
-      void Promise.all([loadRating(), loadStats()]);
+      void Promise.all([loadPair(), loadStats()]);
     }, 0);
     return () => {
       window.clearTimeout(initialLoad);
       if (toastTimer.current) clearTimeout(toastTimer.current);
     };
-  }, [loadRating, loadStats]);
+  }, [loadPair, loadStats]);
 
   useEffect(() => {
     const readHash = () => {
@@ -480,12 +467,12 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
   }, []);
 
   useEffect(() => {
-    if (view !== "rank" || ratingState !== "empty") return;
+    if (view !== "rank" || pairState !== "empty") return;
     const poll = window.setInterval(() => {
-      void loadRating();
+      void loadPair();
     }, 30_000);
     return () => window.clearInterval(poll);
-  }, [loadRating, ratingState, view]);
+  }, [loadPair, pairState, view]);
 
   useEffect(() => {
     if (view !== "collection" || leaderboardLoaded) return;
@@ -517,59 +504,57 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
     return () => window.clearInterval(poll);
   }, [curation, curationState, loadCuration, view]);
 
-  const rate = useCallback(
-    async (value: RatingValue) => {
-      if (ratingState !== "ready" || !ratingItem || deciding) return;
+  const choose = useCallback(
+    async () => {
+      if (pairState !== "ready" || !pair || decisionInFlight.current || !loadedSides.left || !loadedSides.right) return;
+      decisionInFlight.current = true;
       setDeciding(true);
-      setSelectedRating(value);
       try {
-        await requestJson<{
-          imageId: number;
-          value: RatingValue;
-          normalizedReward: number;
-          replayed: boolean;
-        }>("/api/ratings", {
+        await requestJson("/api/comparisons", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            imageId: ratingItem.image.id,
-            value,
-            ratingToken: ratingItem.ratingToken,
-          }),
+          body: JSON.stringify(comparisonInputForPair(pair, pair[activeSide].id)),
         });
         setSessionChoices((count) => count + 1);
         setLeaderboardLoaded(false);
-        announce(`Rating ${value} saved`);
-        await new Promise((resolve) => window.setTimeout(resolve, 180));
-        await Promise.all([loadRating(), loadStats()]);
+        announce("Choice saved");
+        setPairState("loading");
+        setPair(null);
+        await Promise.all([loadPair(), loadStats()]);
       } catch (error) {
-        setSelectedRating(null);
-        announce(error instanceof Error ? error.message : "Rating was not saved.");
+        announce(error instanceof Error ? error.message : "Your choice was not saved.");
       } finally {
+        decisionInFlight.current = false;
         setDeciding(false);
       }
     },
-    [announce, deciding, loadRating, loadStats, ratingItem, ratingState],
+    [activeSide, announce, loadedSides, loadPair, loadStats, pair, pairState],
   );
 
   const skip = useCallback(() => {
-    if (deciding) return;
-    const excludedId = ratingItem?.image.id;
-    announce("Photograph skipped");
-    setRatingState("loading");
-    setRatingItem(null);
-    setSelectedRating(null);
-    void loadRating(excludedId);
-  }, [announce, deciding, loadRating, ratingItem]);
+    if (decisionInFlight.current || pairState !== "ready" || !pair) return;
+    announce("Pair skipped without a preference");
+    setPairState("loading");
+    setPair(null);
+    void loadPair(pair);
+  }, [announce, loadPair, pair, pairState]);
+
+  const showSide = useCallback((side: PairSide) => {
+    if (!decisionInFlight.current && pairState === "ready") setActiveSide(side);
+  }, [pairState]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (view !== "rank" || event.repeat) return;
       const target = event.target as HTMLElement | null;
-      if (target?.matches("input, textarea, select")) return;
-      if (/^[1-5]$/.test(event.key)) {
+      if (target?.closest("input, textarea, select, [contenteditable=true], .account-menu")) return;
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         event.preventDefault();
-        void rate(Number(event.key) as RatingValue);
+        showSide(event.key === "ArrowLeft" ? "left" : "right");
+      } else if (event.code === "Space") {
+        if (target?.closest("button, a, summary") && !target.closest(".pair-navigation")) return;
+        event.preventDefault();
+        void choose();
       } else if (event.key.toLowerCase() === "s") {
         event.preventDefault();
         skip();
@@ -577,7 +562,7 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [rate, skip, view]);
+  }, [choose, showSide, skip, view]);
 
   useEffect(() => {
     const node = dialog.current;
@@ -594,27 +579,12 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerType !== "touch" || deciding) return;
     event.currentTarget.setPointerCapture(event.pointerId);
-    setGesture(null);
     pointerStart.current = { x: event.clientX, y: event.clientY };
-  };
-
-  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!pointerStart.current || event.pointerType !== "touch") return;
-    const dx = event.clientX - pointerStart.current.x;
-    const dy = event.clientY - pointerStart.current.y;
-    if (Math.abs(dx) < 18 && Math.abs(dy) < 18) {
-      setGesture(null);
-    } else if (Math.abs(dy) > Math.abs(dx)) {
-      setGesture(dy < 0 ? "skip" : null);
-    } else {
-      setGesture(ratingForSwipe(dx, event.currentTarget.clientWidth));
-    }
   };
 
   const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     const start = pointerStart.current;
     pointerStart.current = null;
-    setGesture(null);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -623,8 +593,8 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
     const dy = event.clientY - start.y;
     if (Math.abs(dy) > Math.abs(dx) && dy < -58) {
       skip();
-    } else if (Math.abs(dx) > 28 && Math.abs(dx) > Math.abs(dy)) {
-      void rate(ratingForSwipe(dx, event.currentTarget.clientWidth));
+    } else if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy)) {
+      showSide(dx < 0 ? "right" : "left");
     }
   };
 
@@ -649,7 +619,7 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
               </span>
               <span className="stat-divider" aria-hidden="true" />
               <span>
-                <strong>{stats.ratings.toLocaleString()}</strong> ratings
+                <strong>{stats.comparisons.toLocaleString()}</strong> comparisons
               </span>
               {accountMenu}
             </div>
@@ -673,12 +643,12 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
             aria-labelledby="rank-title"
             aria-describedby="rank-help"
           >
-            <h1 className="visually-hidden" id="rank-title">Rate this photograph</h1>
+            <h1 className="visually-hidden" id="rank-title">Choose your preferred photograph</h1>
             <p className="visually-hidden" id="rank-help">
-              Choose one of five rating dots or press a number from 1 through 5. Swipe horizontally to rate, or press S or swipe up to skip.
+              Use the arrows or swipe horizontally to switch between the two photographs. Press Space or the checkmark to choose the photograph on screen. Press S or swipe up to skip without choosing.
             </p>
             <p className="visually-hidden" aria-live="polite">
-              {sessionChoices.toLocaleString()} {sessionChoices === 1 ? "rating" : "ratings"} this session.
+              {sessionChoices.toLocaleString()} {sessionChoices === 1 ? "comparison" : "comparisons"} this session.
             </p>
             <div className="rank-overlay" aria-label="Ranking controls">
               <div className="rank-identity" aria-label="Lumen taste session">
@@ -689,8 +659,9 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
                 <button
                   className="rank-control-button"
                   type="button"
-                  aria-label="Skip this photograph"
-                  disabled={ratingState !== "ready" || deciding}
+                  aria-label="Skip this pair without choosing"
+                  aria-keyshortcuts="S"
+                  disabled={pairState !== "ready" || deciding}
                   onClick={skip}
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13m-4-4 4 4-4 4" /></svg>
@@ -710,86 +681,114 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
               </div>
             </div>
 
-            <div className="rating-stage-wrap">
-              {ratingState === "ready" && ratingItem ? (
+            <div className="pair-stage-wrap">
+              {pairState === "ready" && pair ? (
                 <div
-                  className={`rating-stage${deciding ? " is-deciding" : ""}${gesture ? " is-gesturing" : ""}`}
-                  data-gesture={gesture ?? undefined}
+                  className={`pair-stage${deciding ? " is-deciding" : ""}`}
                   aria-busy={deciding}
                 >
                   <div
-                    className="rating-gesture-surface"
+                    className="pair-gesture-surface"
                     onPointerDown={onPointerDown}
-                    onPointerMove={onPointerMove}
                     onPointerUp={onPointerUp}
                     onPointerCancel={(event) => {
                       pointerStart.current = null;
-                      setGesture(null);
                       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
                         event.currentTarget.releasePointerCapture(event.pointerId);
                       }
                     }}
                   >
-                    <RatingPhoto
-                      key={`rating-${ratingItem.image.id}`}
-                      image={ratingItem.image}
-                      selectedRating={selectedRating}
-                      deciding={deciding}
-                      onUnavailable={() => {
-                        setRatingItem(null);
-                        setRatingState("error");
-                        setSelectedRating(null);
-                      }}
-                    />
-                  </div>
-                  <div className="rating-scale" role="group" aria-label="Rate this photograph from 1 to 5">
-                    {RATING_VALUES.map((value) => (
-                      <button
-                        className={`rating-value${gesture === value ? " is-preview" : ""}${selectedRating === value ? " is-selected" : ""}`}
-                        data-value={value}
-                        key={value}
-                        type="button"
-                        aria-label={`Rate ${value} out of 5`}
-                        aria-keyshortcuts={String(value)}
-                        aria-pressed={selectedRating === value}
-                        disabled={deciding}
-                        onClick={() => void rate(value)}
-                      >
-                        <span className="rating-dot" aria-hidden="true" />
-                      </button>
+                    {(["left", "right"] as const).map((side) => (
+                      <PairPhoto
+                        key={`${pair.comparisonToken}-${side}`}
+                        image={pair[side]}
+                        active={activeSide === side}
+                        onLoad={() => setLoadedSides((current) => ({ ...current, [side]: true }))}
+                        onUnavailable={() => {
+                          setPair(null);
+                          setPairState("error");
+                          announce("A photograph could not be loaded; no choice was recorded.");
+                        }}
+                      />
                     ))}
+                  </div>
+                  <div className="pair-navigation" role="group" aria-label="Compare the two photographs">
+                    <button
+                      className="pair-arrow"
+                      type="button"
+                      aria-label="Show first photograph"
+                      aria-keyshortcuts="ArrowLeft"
+                      disabled={deciding}
+                      onClick={() => showSide("left")}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6" /></svg>
+                    </button>
+                    <span className="pair-position" role="group" aria-label="Photograph selection">
+                      {(["left", "right"] as const).map((side, index) => (
+                        <button
+                          className="pair-position-button"
+                          key={side}
+                          type="button"
+                          aria-label={`Show photograph ${index + 1} of 2`}
+                          aria-pressed={activeSide === side}
+                          disabled={deciding}
+                          onClick={() => showSide(side)}
+                        ><span aria-hidden="true" /></button>
+                      ))}
+                    </span>
+                    <button
+                      className="pair-arrow"
+                      type="button"
+                      aria-label="Show second photograph"
+                      aria-keyshortcuts="ArrowRight"
+                      disabled={deciding}
+                      onClick={() => showSide("right")}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 6 6 6-6 6" /></svg>
+                    </button>
+                    <span className="pair-control-divider" aria-hidden="true" />
+                    <button
+                      className="pair-choose"
+                      type="button"
+                      aria-label={`Choose ${activeSide === "left" ? "first" : "second"} photograph as winner`}
+                      aria-keyshortcuts="Space"
+                      disabled={deciding || !loadedSides.left || !loadedSides.right}
+                      onClick={() => void choose()}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>
+                    </button>
                   </div>
                 </div>
               ) : null}
 
-              {ratingState === "loading" ? (
-                <div className="rating-stage rating-loading" aria-label="Loading photograph" aria-busy="true">
+              {pairState === "loading" ? (
+                <div className="pair-stage pair-loading" aria-label="Loading photographs" aria-busy="true">
                   <span className="loading-shimmer" aria-hidden="true" />
                 </div>
               ) : null}
 
-              {ratingState === "empty" ? (
+              {pairState === "empty" ? (
                 <div className="minimal-rank-state" role="status">
                   <span className="minimal-state-mark" aria-hidden="true" />
-                  <span className="visually-hidden">No unrated photographs are available.</span>
+                  <span className="visually-hidden">No comparison pairs are available.</span>
                 </div>
               ) : null}
 
-              {ratingState === "error" ? (
+              {pairState === "error" ? (
                 <div className="minimal-rank-state" role="alert">
-                  <span className="visually-hidden">The photograph could not be loaded.</span>
+                  <span className="visually-hidden">The comparison could not be loaded.</span>
                   <button
                     className="minimal-retry-button"
                     type="button"
                     onClick={() => {
-                      setRatingState("loading");
-                      void loadRating();
+                      setPairState("loading");
+                      void loadPair();
                     }}
                   >
                     <svg viewBox="0 0 24 24" aria-hidden="true">
                       <path d="M19 7v5h-5M5 17v-5h5M18 12a6 6 0 0 0-10.2-4.4L5 10m1 2a6 6 0 0 0 10.2 4.4L19 14" />
                     </svg>
-                    <span className="visually-hidden">Try loading the photograph again</span>
+                    <span className="visually-hidden">Try loading the pair again</span>
                   </button>
                 </div>
               ) : null}
@@ -803,7 +802,7 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
                 <p className="eyebrow">Your living canon</p>
                 <h1 id="collection-title">The <em>collection.</em></h1>
               </div>
-              <p>Your ratings, then your Elo. No predicted scores.</p>
+              <p>Your choices, ranked by Elo. No predicted scores.</p>
             </div>
             <CurationPanel
               curation={curation}
@@ -817,7 +816,7 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
                   ? "Loading your collection…"
                   : `${leaderboard.length.toLocaleString()} photographs`}
               </p>
-              <span>Ratings first · highest first</span>
+              <span>Elo · highest first</span>
             </div>
 
             {leaderboardState === "ready" ? (
@@ -902,9 +901,7 @@ export function LumenApp({ accountMenu }: LumenAppProps) {
               </span>
               <span className="lightbox-details">
                 <span className="lightbox-elo">
-                  {lightbox.image.pointRating
-                    ? `${lightbox.image.pointRating} / 5`
-                    : `${Math.round(lightbox.image.elo ?? 1500).toLocaleString()} Elo`}
+                  {Math.round(lightbox.image.elo ?? 1500).toLocaleString()} Elo
                 </span>
                 {lightbox.image.pageUrl || lightbox.image.sourceUrl ? (
                   <a className="lightbox-source" href={lightbox.image.pageUrl || lightbox.image.sourceUrl || "#"} target="_blank" rel="noreferrer">

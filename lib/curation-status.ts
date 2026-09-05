@@ -15,8 +15,8 @@ export type CurationStatus = {
   runtime: "codex-desktop";
   queue: {
     images: number;
-    unrated: number;
-    rated: number;
+    uncompared: number;
+    compared: number;
     replenishAt: number;
     batchSize: number;
     needsRefill: boolean;
@@ -25,7 +25,7 @@ export type CurationStatus = {
 };
 
 export function presentCurationStatus(
-  counts: { images: number; unrated: number },
+  counts: { images: number; uncompared: number },
   runs: CurationRun[],
 ): CurationStatus {
   return {
@@ -33,10 +33,10 @@ export function presentCurationStatus(
     runtime: "codex-desktop",
     queue: {
       ...counts,
-      rated: counts.images - counts.unrated,
+      compared: counts.images - counts.uncompared,
       replenishAt: CURATOR_THRESHOLD,
       batchSize: CURATOR_BATCH,
-      needsRefill: counts.unrated <= CURATOR_THRESHOLD,
+      needsRefill: counts.uncompared <= CURATOR_THRESHOLD,
     },
     runs,
   };

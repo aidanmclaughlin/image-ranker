@@ -27,9 +27,9 @@ export async function GET(): Promise<Response> {
 
   try {
     const [counts, rows] = await Promise.all([
-      query<{ images: number; unrated: number }>`
+      query<{ images: number; uncompared: number }>`
         SELECT COUNT(*)::INTEGER AS images,
-               COUNT(*) FILTER (WHERE ui.point_rating IS NULL)::INTEGER AS unrated
+               COUNT(*) FILTER (WHERE ui.matches = 0)::INTEGER AS uncompared
           FROM user_images AS ui
           JOIN images AS image ON image.id = ui.image_id
          WHERE ui.user_id = ${userId} AND ui.active AND image.active`,
@@ -51,7 +51,7 @@ export async function GET(): Promise<Response> {
       summary: row.summary,
     }));
     return Response.json(
-      presentCurationStatus(counts[0] ?? { images: 0, unrated: 0 }, runs),
+      presentCurationStatus(counts[0] ?? { images: 0, uncompared: 0 }, runs),
       { headers: { "Cache-Control": "private, no-store" } },
     );
   } catch (error) {

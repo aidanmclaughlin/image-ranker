@@ -38,6 +38,12 @@ test("the comparison API contract requires the issued pair token", () => {
   const input = comparisonInputForPair(pair, pair.left.id);
   const transported = JSON.parse(JSON.stringify(input)) as unknown;
   assert.deepEqual(parseComparisonInput(transported), input);
+  assert.deepEqual(comparisonInputForPair(pair, pair.right.id), {
+    leftId: 1,
+    rightId: 2,
+    winnerId: 2,
+    comparisonToken,
+  });
   assert.equal(
     parseComparisonInput({ leftId: 1, rightId: 2, winnerId: 1 }),
     null,

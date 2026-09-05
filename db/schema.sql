@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS user_images (
   losses INTEGER NOT NULL DEFAULT 0 CHECK (losses >= 0),
   active BOOLEAN NOT NULL DEFAULT TRUE,
   predicted_utility DOUBLE PRECISION,
+  elo_seeded_at TIMESTAMPTZ,
   point_rating SMALLINT,
   point_rated_at TIMESTAMPTZ,
   discovered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS user_images (
 );
 
 ALTER TABLE user_images
+  ADD COLUMN IF NOT EXISTS elo_seeded_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS point_rating SMALLINT,
   ADD COLUMN IF NOT EXISTS point_rated_at TIMESTAMPTZ;
 ALTER TABLE user_images
@@ -119,8 +121,8 @@ ALTER TABLE comparisons
   ADD COLUMN IF NOT EXISTS right_elo_after DOUBLE PRECISION,
   ADD COLUMN IF NOT EXISTS elo_delta DOUBLE PRECISION;
 
--- Point ratings are immutable events. The current value on user_images is a
--- read-optimized projection written in the same transaction as this record.
+-- Retired pointwise tables remain only for a recoverable, owner-scoped migration.
+-- The active rating function below refuses all writes, including stale clients.
 CREATE TABLE IF NOT EXISTS image_ratings (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -535,93 +537,21 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 AS $$
-DECLARE
-  issuance rating_issuances%ROWTYPE;
-  rated_image user_images%ROWTYPE;
-  prior_rating image_ratings%ROWTYPE;
-  applied_at TIMESTAMPTZ;
 BEGIN
-  IF rating_image_id IS NULL
-     OR rating_image_id <= 0
-     OR rating_value IS NULL
-     OR rating_value NOT BETWEEN 1 AND 5 THEN
-    RAISE EXCEPTION 'Rating must be between 1 and 5 for a valid image'
-      USING ERRCODE = '22023';
-  END IF;
-  IF rating_idempotency_key IS NULL
-     OR rating_idempotency_key !~ '^[0-9a-f]{64}$' THEN
-    RAISE EXCEPTION 'A valid rating token is required'
-      USING ERRCODE = '22023';
-  END IF;
-
-  -- Serialize all retries for this opaque issuance before checking its event.
-  SELECT issued.* INTO issuance
-    FROM rating_issuances AS issued
-   WHERE issued.token_hash = rating_idempotency_key
-     AND issued.user_id = rating_user_id
-     AND issued.image_id = rating_image_id
-   FOR UPDATE;
-  IF issuance.token_hash IS NULL THEN
-    RAISE EXCEPTION 'Rating token is invalid for this image'
-      USING ERRCODE = '22023';
-  END IF;
-
-  SELECT rating.* INTO prior_rating
-    FROM image_ratings AS rating
-   WHERE rating.user_id = rating_user_id
-     AND rating.idempotency_key = rating_idempotency_key;
-  IF prior_rating.id IS NOT NULL THEN
-    IF prior_rating.image_id <> rating_image_id
-       OR prior_rating.value <> rating_value THEN
-      RAISE EXCEPTION 'Rating token was already used for another rating'
-        USING ERRCODE = '22023';
-    END IF;
-    RETURN QUERY SELECT prior_rating.value, prior_rating.rated_at, TRUE;
-    RETURN;
-  END IF;
-
-  IF issuance.expires_at <= NOW() THEN
-    RAISE EXCEPTION 'Rating token has expired'
-      USING ERRCODE = '22023';
-  END IF;
-
-  SELECT ui.* INTO rated_image
-    FROM user_images AS ui
-    JOIN images AS image ON image.id = ui.image_id
-   WHERE ui.user_id = rating_user_id
-     AND ui.image_id = rating_image_id
-     AND ui.active
-     AND image.active
-   FOR UPDATE OF ui;
-  IF rated_image.image_id IS NULL THEN
-    RAISE EXCEPTION 'Image must exist in the user library'
-      USING ERRCODE = '22023';
-  END IF;
-  IF rated_image.point_rating IS NOT NULL THEN
-    RAISE EXCEPTION 'Image was already rated'
-      USING ERRCODE = '22023';
-  END IF;
-
-  applied_at := NOW();
-  INSERT INTO image_ratings (
-    user_id, image_id, value, idempotency_key, rated_at
-  ) VALUES (
-    rating_user_id, rating_image_id, rating_value,
-    rating_idempotency_key, applied_at
-  );
-  UPDATE user_images
-     SET point_rating = rating_value,
-         point_rated_at = applied_at
-   WHERE user_id = rating_user_id AND image_id = rating_image_id;
-  UPDATE rating_issuances
-     SET used_at = applied_at
-   WHERE token_hash = rating_idempotency_key;
-  -- Curation reads human feedback directly; retired policy history is immutable
-  -- in the active app and receives no new inferred or normalized rewards.
-
-  RETURN QUERY SELECT rating_value, applied_at, FALSE;
+  RAISE EXCEPTION 'Pointwise ratings are retired; use pairwise comparisons'
+    USING ERRCODE = '0A000';
 END;
 $$;
+
+-- An owner can receive the weak legacy Elo prior exactly once. This marker
+-- stores no pointwise values; the reversible pre-migration backup stays local.
+CREATE TABLE IF NOT EXISTS pairwise_migrations (
+  user_id TEXT PRIMARY KEY,
+  version TEXT NOT NULL CHECK (version = 'pointwise-elo-v1'),
+  migrated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  seeded_images INTEGER NOT NULL CHECK (seeded_images >= 0),
+  backup_sha256 TEXT NOT NULL CHECK (backup_sha256 ~ '^[0-9a-f]{64}$')
+);
 
 -- Agent curation is separate from retired training and bandit history.
 CREATE TABLE IF NOT EXISTS curation_runs (

@@ -1,4 +1,5 @@
 import { auth } from "@/auth";
+import { parsePairExclusion } from "@/lib/comparison-contract";
 import { issueComparisonToken, nextPair } from "@/lib/ranking";
 import { safeErrorMessage } from "@/lib/redaction";
 import { presentImage } from "@/lib/types";
@@ -7,13 +8,20 @@ export const dynamic = "force-dynamic";
 
 const PRIVATE_NO_STORE = { "Cache-Control": "private, no-store" };
 
-export async function GET(): Promise<Response> {
+export async function GET(request: Request): Promise<Response> {
   const session = await auth();
   const userId = session?.user?.id;
   if (!userId) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
+  let excludedPair: [number, number] | undefined;
   try {
-    const pair = await nextPair(userId);
+    excludedPair = parsePairExclusion(new URL(request.url).searchParams);
+  } catch {
+    return Response.json({ error: "Invalid pair exclusion" }, { status: 400 });
+  }
+
+  try {
+    const pair = await nextPair(userId, { excludedPair });
     if (!pair) {
       return Response.json(
         { left: null, right: null, comparisonToken: null },

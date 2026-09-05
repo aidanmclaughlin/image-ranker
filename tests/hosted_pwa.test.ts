@@ -56,60 +56,84 @@ test("hosted ranking is an immersive surface with direct collection access", asy
   assert.match(styles, /\.hosted-rank-view\s*\{[\s\S]*?height:\s*100dvh[\s\S]*?overflow:\s*hidden/);
 });
 
-test("hosted ranking uses one photograph and an accessible five-dot scale", async () => {
+test("hosted ranking compares complete photographs without pointwise controls", async () => {
   const [component, styles] = await Promise.all([
     readFile(new URL("../components/lumen-app.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
 
-  assert.match(component, /const RATING_VALUES = \[1, 2, 3, 4, 5\] as const/);
-  assert.match(component, /requestJson<RatingResponse>\(path\)/);
-  assert.match(component, /\}\>\("\/api\/ratings", \{/);
-  assert.match(component, /aria-label=\{`Rate \$\{value\} out of 5`\}/);
-  assert.match(component, /aria-keyshortcuts=\{String\(value\)\}/);
-  assert.match(component, /className="rating-gesture-surface"/);
+  assert.match(component, /requestJson<PairResponse>\(path\)/);
+  assert.match(component, /requestJson\("\/api\/comparisons", \{/);
+  assert.match(component, /comparisonInputForPair\(pair, pair\[activeSide\]\.id\)/);
+  assert.match(component, /aria-keyshortcuts="ArrowLeft"/);
+  assert.match(component, /aria-keyshortcuts="ArrowRight"/);
+  assert.match(component, /aria-keyshortcuts="Space"/);
+  assert.match(component, /className="pair-gesture-surface"/);
   assert.match(component, /onUnavailable=\{onUnavailable\}/);
-  assert.match(component, /setRatingState\("error"\)/);
-  assert.doesNotMatch(component, /\/api\/pair|\/api\/comparisons|comparisonToken/);
+  assert.match(component, /setPairState\("error"\)/);
+  assert.doesNotMatch(component, /\/api\/ratings?\b|ratingToken|RatingValue|pointRating|pointRatedAt|rating-scale/);
   assert.doesNotMatch(component, /className="(?:candidate|versus|instruction-bar|rank-session-status)"/);
   assert.match(component, /className="visually-hidden">Lumen</);
   assert.match(component, /className="visually-hidden">Skip</);
   assert.match(component, /className="visually-hidden">Ranked list</);
-  const ratingImageRule = styles.match(/\.rating-photo img\s*\{([\s\S]*?)\}/)?.[1] ?? "";
-  assert.match(ratingImageRule, /position:\s*absolute/);
-  assert.match(ratingImageRule, /inset:\s*0/);
-  assert.match(ratingImageRule, /width:\s*auto/);
-  assert.match(ratingImageRule, /max-width:\s*100%/);
-  assert.match(ratingImageRule, /height:\s*auto/);
-  assert.match(ratingImageRule, /max-height:\s*100%/);
-  assert.match(ratingImageRule, /margin:\s*auto/);
-  assert.match(ratingImageRule, /object-fit:\s*contain/);
-  assert.doesNotMatch(ratingImageRule, /object-fit:\s*cover/);
-  assert.match(styles, /\.rating-photo \.image-shell\s*\{[\s\S]*?width:\s*100%[\s\S]*?height:\s*100%/);
-  assert.match(styles, /\.hosted-rank-view \.rating-stage\s*\{[\s\S]*?overflow:\s*hidden/);
-  assert.match(styles, /\.rating-photo\s*\{[\s\S]*?overflow:\s*hidden/);
-
-  const ratingTransforms = [...styles.matchAll(/(?:\.rating-photo|\.rating-stage)[^{]*img[^}]*\{([^}]*)\}/g)]
-    .flatMap((match) => [...match[1].matchAll(/scale\(([\d.]+)\)/g)])
-    .map((match) => Number(match[1]));
-  assert.ok(ratingTransforms.every((scale) => scale <= 1), "rating transitions must never crop the photograph");
-  assert.match(styles, /\.rating-scale\s*\{[\s\S]*?position:\s*absolute/);
-  assert.match(styles, /\.rating-value\s*\{[\s\S]*?width:\s*42px[\s\S]*?height:\s*42px/);
+  const pairImageRule = styles.match(/\.pair-photo img\s*\{([\s\S]*?)\}/)?.[1] ?? "";
+  assert.match(pairImageRule, /position:\s*absolute/);
+  assert.match(pairImageRule, /inset:\s*0/);
+  assert.match(pairImageRule, /width:\s*auto/);
+  assert.match(pairImageRule, /max-width:\s*100%/);
+  assert.match(pairImageRule, /height:\s*auto/);
+  assert.match(pairImageRule, /max-height:\s*100%/);
+  assert.match(pairImageRule, /margin:\s*auto/);
+  assert.match(pairImageRule, /object-fit:\s*contain/);
+  assert.doesNotMatch(pairImageRule, /object-fit:\s*cover|transform:|filter:/);
+  assert.match(styles, /\.pair-photo \.image-shell\s*\{[\s\S]*?width:\s*100%[\s\S]*?height:\s*100%/);
+  assert.match(styles, /\.hosted-rank-view \.pair-stage\s*\{[\s\S]*?overflow:\s*hidden/);
+  assert.match(styles, /\.pair-photo\s*\{[\s\S]*?visibility:\s*hidden/);
+  assert.match(styles, /\.pair-photo\.is-active\s*\{\s*visibility:\s*visible/);
+  assert.match(styles, /\.pair-gesture-surface\s*\{[\s\S]*?top:\s*calc\([\s\S]*?bottom:\s*calc\(/);
+  assert.match(styles, /\.pair-navigation\s*\{[\s\S]*?position:\s*absolute/);
+  assert.match(styles, /\.pair-navigation button\s*\{[\s\S]*?width:\s*44px[\s\S]*?height:\s*44px/);
   assert.match(styles, /\.hosted-rank-view \.account-avatar\s*\{[\s\S]*?font-size:\s*0/);
 });
 
-test("an empty rating queue polls quietly without overlapping requests", async () => {
+test("an empty comparison queue polls quietly without overlapping requests", async () => {
   const component = await readFile(
     new URL("../components/lumen-app.tsx", import.meta.url),
     "utf8",
   );
 
-  assert.match(component, /const ratingLoadInFlight = useRef\(false\)/);
-  assert.match(component, /if \(ratingLoadInFlight\.current\) return/);
-  assert.match(component, /ratingLoadInFlight\.current = true/);
-  assert.match(component, /finally \{\s*ratingLoadInFlight\.current = false/);
-  assert.match(component, /if \(view !== "rank" \|\| ratingState !== "empty"\) return/);
-  assert.match(component, /window\.setInterval\(\(\) => \{\s*void loadRating\(\);\s*\}, 30_000\)/);
+  assert.match(component, /const pairLoadInFlight = useRef\(false\)/);
+  assert.match(component, /if \(pairLoadInFlight\.current\) return/);
+  assert.match(component, /pairLoadInFlight\.current = true/);
+  assert.match(component, /finally \{\s*pairLoadInFlight\.current = false/);
+  assert.match(component, /if \(view !== "rank" \|\| pairState !== "empty"\) return/);
+  assert.match(component, /window\.setInterval\(\(\) => \{\s*void loadPair\(\);\s*\}, 30_000\)/);
   assert.match(component, /return \(\) => window\.clearInterval\(poll\)/);
-  assert.match(component, /className="visually-hidden">No unrated photographs are available\./);
+  assert.match(component, /className="visually-hidden">No comparison pairs are available\./);
+});
+
+test("pairwise navigation cannot create a preference and submissions are guarded", async () => {
+  const component = await readFile(new URL("../components/lumen-app.tsx", import.meta.url), "utf8");
+  const skip = component.match(/const skip = useCallback\(\(\) => \{([\s\S]*?)\}, \[/)?.[1] ?? "";
+  const navigation = component.match(/const showSide = useCallback\(\(side: PairSide\) => \{([\s\S]*?)\}, \[/)?.[1] ?? "";
+  const swipe = component.match(/const onPointerUp = \(event:[\s\S]*?\n  \};/)?.[0] ?? "";
+  assert.match(skip, /loadPair\(pair\)/);
+  assert.match(component, /excludeLeftId=\$\{excludedPair.left.id\}&excludeRightId=\$\{excludedPair.right.id\}/);
+  assert.match(navigation, /setActiveSide\(side\)/);
+  assert.match(swipe, /showSide\(dx < 0 \? "right" : "left"\)/);
+  for (const action of [skip, navigation, swipe]) {
+    assert.doesNotMatch(action, /\/api\/comparisons|choose\(/);
+  }
+  assert.match(component, /decisionInFlight\.current \|\| !loadedSides.left \|\| !loadedSides.right\) return/);
+  assert.match(component, /decisionInFlight\.current = true;\s*setDeciding\(true\)/);
+  assert.match(component, /finally \{\s*decisionInFlight.current = false/);
+  assert.match(component, /disabled=\{deciding \|\| !loadedSides.left \|\| !loadedSides.right\}/);
+});
+
+test("ranked collection displays only Elo and comparison counts", async () => {
+  const component = await readFile(new URL("../components/lumen-app.tsx", import.meta.url), "utf8");
+  assert.match(component, /stats\.comparisons\.toLocaleString\(\)/);
+  assert.match(component, /Your choices, ranked by Elo/);
+  assert.match(component, /Elo · highest first/);
+  assert.doesNotMatch(component, /pointRating|pointRatedAt|stats\.ratings|Ratings first|legacy comparisons/);
 });

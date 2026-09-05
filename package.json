@@ -12,6 +12,7 @@
     "test:hosted": "node --import tsx --test tests/*.test.ts",
     "db:schema": "node --env-file=.env.local --import tsx scripts/apply-schema.ts",
     "db:verify": "node --env-file=.env.local --import tsx scripts/verify-schema.ts",
+    "db:pairwise": "node --env-file=.env.local --env-file=.env.curator.local --import tsx scripts/migrate-pairwise.ts",
     "db:worker-role": "node --env-file=.env.local --import tsx scripts/provision-worker-role.ts",
     "curator:refresh": "vercel env pull .env.local --environment=production --yes",
     "curator": "node --env-file=.env.local --env-file=.env.curator.local --import tsx scripts/curator.ts",

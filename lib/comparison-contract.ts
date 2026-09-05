@@ -1,5 +1,19 @@
 import type { ComparisonInput } from "@/lib/types";
 
+export function parsePairExclusion(params: URLSearchParams): [number, number] | undefined {
+  const left = params.getAll("excludeLeftId");
+  const right = params.getAll("excludeRightId");
+  if (!left.length && !right.length) return undefined;
+  if (left.length !== 1 || right.length !== 1 || !/^[1-9]\d*$/.test(left[0]) || !/^[1-9]\d*$/.test(right[0])) {
+    throw new Error("Provide two distinct positive image IDs to exclude a pair");
+  }
+  const pair: [number, number] = [Number(left[0]), Number(right[0])];
+  if (!pair.every(Number.isSafeInteger) || pair[0] === pair[1]) {
+    throw new Error("Provide two distinct positive image IDs to exclude a pair");
+  }
+  return pair;
+}
+
 interface IssuedPair {
   left: { id: number };
   right: { id: number };

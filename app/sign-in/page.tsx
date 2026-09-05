@@ -43,7 +43,7 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
             that <em>stay.</em>
           </h1>
           <p>
-            Rate the photographs that move you. Your feedback guides what
+            Choose between two photographs. Your comparisons guide what
             we find next.
           </p>
         </div>
